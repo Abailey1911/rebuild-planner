@@ -36,6 +36,8 @@ import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.SwingUtilities;
 import javax.swing.JTextField;
+import javax.swing.JToggleButton;
+import javax.swing.ButtonGroup;
 import javax.swing.SwingConstants;
 import javax.swing.border.EmptyBorder;
 import javax.swing.text.View;
@@ -99,6 +101,13 @@ public class RebuildPanel extends PluginPanel
 	/** The outcome of the last change, kept on screen until the next one. */
 	private List<String[]> changes;
 	private boolean scrollToTop;
+
+	private static final String[] TABS = {"Plan", "Kit", "Sell"};
+	private final JPanel tabRow = new JPanel(new GridLayout(1, 0, 3, 0));
+	private final JToggleButton[] tabButtons = new JToggleButton[TABS.length];
+	/** One-line verdict shown on every tab, so a change made on Sell shows its effect at once. */
+	private final JLabel status = new JLabel();
+	private int selectedTab;
 	/** Scroll position to restore after the next render, or -1. */
 	private int keepScroll = -1;
 
@@ -188,6 +197,30 @@ public class RebuildPanel extends PluginPanel
 		top.add(Box.createVerticalStrut(4));
 		top.add(caption("Earn it back at"));
 		top.add(methodBox);
+		top.add(Box.createVerticalStrut(6));
+
+		tabRow.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		final ButtonGroup group = new ButtonGroup();
+		for (int i = 0; i < TABS.length; i++)
+		{
+			final int index = i;
+			final JToggleButton tab = new JToggleButton(TABS[i], i == 0);
+			tab.setFont(FontManager.getRunescapeSmallFont());
+			tab.setFocusPainted(false);
+			tab.addActionListener(e ->
+			{
+				selectedTab = index;
+				scrollToTop = true;
+				render();
+			});
+			group.add(tab);
+			tabButtons[i] = tab;
+			tabRow.add(tab);
+		}
+		top.add(left(tabRow));
+		top.add(Box.createVerticalStrut(4));
+		status.setFont(FontManager.getRunescapeSmallFont());
+		top.add(left(status));
 		add(top, BorderLayout.NORTH);
 
 		content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
@@ -448,6 +481,8 @@ public class RebuildPanel extends PluginPanel
 	public void showLoggedOut()
 	{
 		content.removeAll();
+		tabRow.setVisible(false);
+		status.setVisible(false);
 		final JPanel card = card("Not logged in", MUTED);
 		card.add(text("Log in to your account and the planner will read your bank, inventory and worn gear.",
 			INNER - 20, Color.WHITE));
@@ -678,6 +713,8 @@ public class RebuildPanel extends PluginPanel
 	private void render()
 	{
 		content.removeAll();
+		tabRow.setVisible(bankSeen);
+		status.setVisible(bankSeen);
 
 		// Until the bank has been read the plan would be built on the inventory
 		// alone and mislead, so show nothing but how to fix that.
@@ -699,15 +736,54 @@ public class RebuildPanel extends PluginPanel
 		}
 
 		diff(plan);
-		addSummary(plan);
-		addChanges(plan);
-		addKeeps(plan);
-		addEarnBack(plan);
-		addSwaps(plan);
-		addSales(plan);
-		addBuys(plan);
-		addExcluded(plan);
+		updateStatus(plan);
+		switch (selectedTab)
+		{
+			case 1:
+				// What you end up wearing, and what that needs buying.
+				addKeeps(plan);
+				addBuys(plan);
+				break;
+			case 2:
+				// Everything you can act on: what goes, and your own changes.
+				addChanges(plan);
+				addSwaps(plan);
+				addSales(plan);
+				addExcluded(plan);
+				break;
+			default:
+				addSummary(plan);
+				addEarnBack(plan);
+				break;
+		}
 		refresh();
+	}
+
+	private void updateStatus(Plan plan)
+	{
+		final String text;
+		final Color colour;
+		if (!plan.isWorthIt())
+		{
+			text = "Not worth it";
+			colour = BAD;
+		}
+		else if (plan.getNeeded() <= 0 || plan.isFunded())
+		{
+			text = "Affordable";
+			colour = GOOD;
+		}
+		else
+		{
+			text = "Short by " + gp(plan.getShortfall());
+			colour = BAD;
+		}
+		// Kept short: a label does not wrap, and a long one would widen the sidebar.
+		status.setText(text + "  \u00B7  " + gp(Math.min(plan.getRaised(), plan.getNeeded())) + " / " + gp(plan.getNeeded()));
+		status.setToolTipText("Raised by the sales on the Sell tab, out of what is still needed after your coins");
+		status.setForeground(colour);
+		tabButtons[2].setText(plan.getSwaps().isEmpty() && plan.getSales().isEmpty() ? "Sell"
+			: "Sell (" + (plan.getSwaps().size() + (int) plan.getSales().stream().filter(Plan.Sale::isNeeded).count()) + ")");
 	}
 	// ---- Sections --------------------------------------------------------
 
