@@ -18,6 +18,7 @@ public class Plan
 	@Value
 	public static class Keep
 	{
+		int itemId;
 		String role;
 		String slot;
 		String name;
@@ -27,6 +28,7 @@ public class Plan
 	@Value
 	public static class Buy
 	{
+		int itemId;
 		String role;
 		String slot;
 		String name;
@@ -52,6 +54,10 @@ public class Plan
 	@Value
 	public static class Swap
 	{
+		/** First item sold, for its picture. */
+		int sellId;
+		/** Replacement's picture, or -1 when the slot is left empty. */
+		int useId;
 		String role;
 		String sell;
 		String use;

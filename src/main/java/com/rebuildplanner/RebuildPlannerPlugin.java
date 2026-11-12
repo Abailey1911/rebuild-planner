@@ -79,7 +79,7 @@ public class RebuildPlannerPlugin extends Plugin
 		final Map<String, List<Integer>> variants = RebuildData.loadVariants(gson);
 		planner = new Planner(new ClientItemInfo(), variants);
 
-		panel = new RebuildPanel(goals, this::requestPlan);
+		panel = new RebuildPanel(goals, itemManager, this::requestPlan);
 
 		navButton = NavigationButton.builder()
 			.tooltip("Rebuild Planner")
@@ -177,7 +177,7 @@ public class RebuildPlannerPlugin extends Plugin
 		}
 		if (client.getGameState() != GameState.LOGGED_IN)
 		{
-			SwingUtilities.invokeLater(() -> target.showMessage("Log in to plan a rebuild."));
+			SwingUtilities.invokeLater(target::showLoggedOut);
 			return;
 		}
 

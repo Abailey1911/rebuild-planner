@@ -310,7 +310,7 @@ public class Planner
 				if (fill != null)
 				{
 					final long cost = items.price(fill.listId);
-					plan.getBuys().add(new Plan.Buy(label(mainRole), entry.getKey(), fill.name, cost));
+					plan.getBuys().add(new Plan.Buy(fill.listId, label(mainRole), entry.getKey(), fill.name, cost));
 					buyCost += cost;
 					picks.put(entry.getKey(), fill);
 				}
@@ -365,7 +365,7 @@ public class Planner
 						if (fill != null)
 						{
 							final long cost = items.price(fill.listId);
-							plan.getBuys().add(new Plan.Buy(label(role), slot.getSlot(), fill.name, cost));
+							plan.getBuys().add(new Plan.Buy(fill.listId, label(role), slot.getSlot(), fill.name, cost));
 							buyCost += cost;
 						}
 					}
@@ -534,7 +534,8 @@ public class Planner
 				}
 				raised += (long) move[2];
 				kitSold += (long) move[3];
-				plan.getSwaps().add(new Plan.Swap(label(keep.role), items.name(keep.pick.ownedId),
+				plan.getSwaps().add(new Plan.Swap(keep.pick.ownedId, replacement == null ? -1 : (replacement.ownedId >= 0 ? replacement.ownedId : replacement.listId),
+					label(keep.role), items.name(keep.pick.ownedId),
 					replacement == null ? "nothing in this slot" : replacement.name,
 					replacement != null && replacement.ownedId >= 0, (long) move[2], 0));
 				keepQty.remove(keep.pick.ownedId);
@@ -662,18 +663,21 @@ public class Planner
 			if (bestIsVoid)
 			{
 				final List<String> sold = new ArrayList<>();
+				final List<Integer> soldIds = new ArrayList<>();
 				for (String slot : VOID_SLOTS)
 				{
 					final Option pick = picks.get(slot);
 					if (pick != null && pick.ownedId >= 0 && items.tradeable(pick.ownedId))
 					{
 						sold.add(items.name(pick.ownedId));
+						soldIds.add(pick.ownedId);
 						keepQty.remove(pick.ownedId);
 					}
 				}
 				useVoid = true;
 				plan.setUsesVoid(true);
-				plan.getSwaps().add(new Plan.Swap(label(mainRole), String.join(", ", sold),
+				plan.getSwaps().add(new Plan.Swap(soldIds.isEmpty() ? ELITE_VOID_TOP : soldIds.get(0), ELITE_VOID_TOP,
+					label(mainRole), String.join(", ", sold),
 					"Elite void set", true, bestFreed, loss));
 			}
 			else
@@ -685,7 +689,8 @@ public class Planner
 					keepQty.put(bestAlt.ownedId, 1L);
 					plan.getSales().remove(saleById.remove(bestAlt.ownedId));
 				}
-				plan.getSwaps().add(new Plan.Swap(label(mainRole), items.name(pick.ownedId),
+				plan.getSwaps().add(new Plan.Swap(pick.ownedId, bestAlt.ownedId >= 0 ? bestAlt.ownedId : bestAlt.listId,
+					label(mainRole), items.name(pick.ownedId),
 					bestAlt.name, bestAlt.ownedId >= 0, bestFreed, loss));
 				picks.put(bestSlot, bestAlt);
 			}
@@ -699,14 +704,18 @@ public class Planner
 		{
 			if (useVoid)
 			{
-				plan.getKeeps().add(new Plan.Keep(label(mainRole), "SET", "Elite void set"));
+				for (int id : new int[]{voidHelm(goal.getStyle()), ELITE_VOID_TOP, ELITE_VOID_ROBE, VOID_GLOVES})
+				{
+					final int held = ownedForm(id, owned);
+					plan.getKeeps().add(new Plan.Keep(held >= 0 ? held : id, label(mainRole), "VOID", items.name(id)));
+				}
 			}
 			for (Map.Entry<String, Option> entry : picks.entrySet())
 			{
 				final Option pick = entry.getValue();
 				if (pick != null && pick.ownedId >= 0 && !(useVoid && VOID_SLOTS.contains(entry.getKey())))
 				{
-					plan.getKeeps().add(new Plan.Keep(label(mainRole), entry.getKey(), pick.name));
+					plan.getKeeps().add(new Plan.Keep(pick.ownedId, label(mainRole), entry.getKey(), pick.name));
 				}
 			}
 		}
@@ -714,7 +723,7 @@ public class Planner
 		{
 			if (keep.pick != null && keep.pick.ownedId >= 0)
 			{
-				plan.getKeeps().add(new Plan.Keep(label(keep.role), keep.slot, keep.pick.name));
+				plan.getKeeps().add(new Plan.Keep(keep.pick.ownedId, label(keep.role), keep.slot, keep.pick.name));
 			}
 		}
 
