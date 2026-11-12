@@ -289,6 +289,16 @@ public class Planner
 		return stats != null && stats.isTwoHanded();
 	}
 
+	/**
+	 * Void only does anything as a complete set, which the main setup handles as
+	 * one decision. A lone void robe under a fighter torso is worse than useless.
+	 */
+	private boolean isVoidPiece(int itemId)
+	{
+		final String name = lower(itemId);
+		return name.startsWith("void ") || name.startsWith("elite void") || name.contains("void knight");
+	}
+
 	private boolean isAmmunition(Option option)
 	{
 		return DpsModel.kindOf(lower(option.listId)) != DpsModel.Ammo.NONE;
@@ -359,7 +369,8 @@ public class Planner
 					for (Option option : entry.getValue())
 					{
 						final long cost = rules.cost(option);
-						if (cost < 0 || ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
+						if (cost < 0 || isVoidPiece(option.listId)
+							|| ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
 						{
 							continue;
 						}
@@ -450,7 +461,7 @@ public class Planner
 		{
 			final long price = items.price(option.listId);
 			if (price <= 0 || !items.tradeable(option.listId) || goalIds.contains(option.listId)
-				|| ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
+				|| isVoidPiece(option.listId) || ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
 			{
 				continue;
 			}
@@ -844,7 +855,7 @@ public class Planner
 				}
 				for (Option alt : entry.getValue())
 				{
-					if (alt == pick || alt.listId == pick.ownedId
+					if (alt == pick || alt.listId == pick.ownedId || isVoidPiece(alt.listId)
 						|| ("AMMO".equals(slot) && !DpsModel.ammoFits(items, goal.getId(), alt.listId)))
 					{
 						continue;

@@ -342,6 +342,26 @@ public class PlannerTest
 		assertTrue("The main setup is untouched", keeps(plan, "Ancestral robe top"));
 	}
 
+	/** Void only works as a full set, so a lone void piece never fills a switch slot. */
+	@Test
+	public void neverWearsALoneVoidPiece()
+	{
+		final RebuildData.Method toa = toa(150_000_000L);
+		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		item(toa, "MELEE", "Osmumten's fang", 25_000_000L, weapon(105, 75, 0, 0, 0, 103, 0, 5, false), 1);
+		item(toa, "MELEE", "Oathplate chest", 90_000_000L, melee(0, 0, 10), 1);
+		item(toa, "MELEE", "Oathplate legs", 65_000_000L, melee(0, 0, 8), 1);
+		item(toa, "MELEE", "Fighter torso", 0, melee(0, 0, 4), 1);
+		items.untradeable.add(id(toa, "MELEE", "Fighter torso"));
+		item(toa, "MELEE", "Elite void robe", 0, melee(0, 0, 0), 1);
+		items.untradeable.add(id(toa, "MELEE", "Elite void robe"));
+
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, null);
+
+		assertFalse(keeps(plan, "Elite void robe"));
+		assertTrue(plan.getSwaps().stream().noneMatch(s -> s.getUse().toLowerCase().contains("void")));
+	}
+
 	/** An item the player crosses out is never sold; something else is found. */
 	@Test
 	public void honoursItemsThePlayerKeeps()
