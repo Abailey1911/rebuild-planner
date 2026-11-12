@@ -111,6 +111,12 @@ public class Plan
 	/** Damage given up on the main setup, in percent. */
 	private double dpsLossPct;
 	private long estGpPerHour;
+	/** The player's best weapon today, which the megarare would replace; null if they own none. */
+	private String todayWeapon;
+	/** Damage the rebuilt setup gains over today's, in percent. */
+	private double gainPct;
+	/** False when the rebuilt setup barely beats what the player already has. */
+	private boolean worthIt = true;
 	/** Gross value of the kit pieces sold in swaps. */
 	private long kitSold;
 

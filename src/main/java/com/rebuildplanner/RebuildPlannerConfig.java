@@ -60,4 +60,16 @@ public interface RebuildPlannerConfig extends Config
 	{
 		return 40;
 	}
+
+	@Range(min = 0, max = 100)
+	@ConfigItem(
+		keyName = "minGain",
+		name = "Least damage gain to rebuild (%)",
+		description = "If the megarare, with the gear you would have left, beats your current weapon by less than this, the plan says the rebuild is not worth it",
+		position = 5
+	)
+	default int minGain()
+	{
+		return 10;
+	}
 }

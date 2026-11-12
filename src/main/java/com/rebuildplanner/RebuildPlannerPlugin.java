@@ -215,7 +215,8 @@ public class RebuildPlannerPlugin extends Plugin
 			client.getRealSkillLevel(Skill.ATTACK), client.getRealSkillLevel(Skill.STRENGTH),
 			client.getRealSkillLevel(Skill.RANGED), client.getRealSkillLevel(Skill.MAGIC));
 		final Planner.Settings settings = new Planner.Settings(
-			config.minStackValue(), config.supplyReserve(), config.maxDpsLoss(), config.maxSwitchLoss());
+			config.minStackValue(), config.supplyReserve(), config.maxDpsLoss(), config.maxSwitchLoss(),
+			config.minGain());
 
 		final List<Plan> plans = new ArrayList<>();
 		for (RebuildData.Method method : goal.getMethods())
@@ -274,6 +275,14 @@ public class RebuildPlannerPlugin extends Plugin
 		@Override
 		public void changed()
 		{
+			// A different megarare is a fresh start: choices made for the last one
+			// would silently skew this plan.
+			if (!overrides.isEmpty())
+			{
+				overrides = new Overrides();
+				overridesChanged();
+				return;
+			}
 			requestPlan();
 		}
 

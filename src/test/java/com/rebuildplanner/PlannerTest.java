@@ -21,7 +21,7 @@ import org.junit.Test;
 public class PlannerTest
 {
 	private static final DpsModel.Levels MAXED = new DpsModel.Levels(99, 99, 99, 99);
-	private static final Planner.Settings SETTINGS = new Planner.Settings(1_000_000, 3_000_000, 15, 40);
+	private static final Planner.Settings SETTINGS = new Planner.Settings(1_000_000, 3_000_000, 15, 40, 10);
 
 	/** Unrelated tradeable used as bank filler. */
 	private static final int SPARE = 900_001;
@@ -402,7 +402,7 @@ public class PlannerTest
 		item(doom, "RANGED", "Masori body (f)", 85_000_000L, ranged(43, 4), 1);
 		item(doom, "RANGED", "Masori body", 9_000_000L, ranged(40, 2), 0);
 
-		final Plan plan = plan("Twisted bow", doom, new Planner.Settings(1_000_000, 3_000_000, 50, 40), null);
+		final Plan plan = plan("Twisted bow", doom, new Planner.Settings(1_000_000, 3_000_000, 50, 40, 10), null);
 
 		final Set<Integer> soldIds = new HashSet<>();
 		for (Plan.Swap swap : plan.getSwaps())
@@ -452,6 +452,37 @@ public class PlannerTest
 		assertEquals(3, obligator.getCharges().size());
 	}
 
+	/**
+	 * Selling the whole Ancestral set to afford a Shadow can leave it barely
+	 * ahead of a Sanguinesti staff in that Ancestral - not worth doing.
+	 */
+	@Test
+	public void saysWhenTheRebuildIsNotWorthIt()
+	{
+		final RebuildData.Method toa = toa(1_200_000_000L);
+		item(toa, "MAGIC", "Sanguinesti staff", 60_000_000L, weapon(0, 0, 0, 25, 0, 0, 0, 4, false), 1);
+		item(toa, "MAGIC", "Ancestral hat", 30_000_000L, magic(8, 2), 1);
+		item(toa, "MAGIC", "Ancestral robe top", 500_000_000L, magic(35, 2), 1);
+		item(toa, "MAGIC", "Ancestral robe bottom", 500_000_000L, magic(26, 2), 1);
+		// The cheap fallback the planner swaps down to.
+		item(toa, "MAGIC", "Ahrim's hood", 1_000_000L, magic(6, 0), 0);
+		item(toa, "MAGIC", "Ahrim's robetop", 1_000_000L, magic(30, 0), 0);
+		item(toa, "MAGIC", "Ahrim's robeskirt", 1_000_000L, magic(22, 0), 0);
+		items.add(SPARE, "Spare trophy", 200_000_000L, null);
+		owned.put(SPARE, 1L);
+
+		final Plan gutted = plan("Tumeken's shadow", toa, new Planner.Settings(1_000_000, 3_000_000, 100, 40, 10), null);
+		assertEquals("Sanguinesti staff", gutted.getTodayWeapon());
+		assertFalse("A Shadow in no armour is no rebuild at all", gutted.isWorthIt());
+
+		// With the money elsewhere and Ancestral kept, it clearly is.
+		items.add(SPARE, "Spare trophy", 2_000_000_000L, null);
+		final Plan kept = plan("Tumeken's shadow", toa, SETTINGS, null);
+		assertTrue(kept.isFunded());
+		assertTrue(kept.isWorthIt());
+		assertTrue(kept.getGainPct() > 10);
+	}
+
 	/** Ancestral is not sold when it would cost more damage than the cap allows. */
 	@Test
 	public void refusesToGutTheMainSetup()
@@ -460,7 +491,7 @@ public class PlannerTest
 		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
 		item(toa, "MAGIC", "Ancestral robe bottom", 90_000_000L, magic(26, 3), 1);
 
-		final Plan plan = plan("Tumeken's shadow", toa, new Planner.Settings(1_000_000, 3_000_000, 2, 40), null);
+		final Plan plan = plan("Tumeken's shadow", toa, new Planner.Settings(1_000_000, 3_000_000, 2, 40, 10), null);
 
 		assertFalse(plan.isFunded());
 		assertTrue(plan.getSwaps().isEmpty());

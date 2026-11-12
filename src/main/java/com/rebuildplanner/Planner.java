@@ -82,6 +82,8 @@ public class Planner
 		double maxDpsLossPct;
 		/** Most damage a switch may give up, in percent. */
 		double maxSwitchLossPct;
+		/** Least damage the rebuilt setup must gain over today's, in percent, to be worth doing. */
+		double minGainPct;
 	}
 
 	/** One entry in a slot's ranked list. */
@@ -110,6 +112,8 @@ public class Planner
 		final String label;
 		final RebuildData.Target target;
 		final Map<String, List<Option>> slots = new LinkedHashMap<>();
+		/** For the main setup: the weapons the megarare would replace. */
+		final List<Option> otherWeapons = new ArrayList<>();
 		/** As the player owns it, before anything is sold. */
 		Map<String, Option> start;
 		/** As it stands now. */
@@ -496,6 +500,15 @@ public class Planner
 			{
 				if (role.main && "WEAPON".equals(slot.getSlot()))
 				{
+					for (int i = 0; i < slot.getIds().size(); i++)
+					{
+						final int id = slot.getIds().get(i);
+						if (!goalIds.contains(id))
+						{
+							role.otherWeapons.add(new Option(id, i, i < slot.getItems().size()
+								? slot.getItems().get(i) : items.name(id), ownedForm(id)));
+						}
+					}
 					continue;
 				}
 				final List<Option> options = new ArrayList<>();
@@ -610,6 +623,7 @@ public class Planner
 
 		plan.setBuyCost(buyCost);
 		plan.setUsesVoid(useVoid);
+		final boolean startVoid = useVoid;
 
 		// ---- What the kit holds on to --------------------------------------
 		final Map<Integer, Long> keepQty = new HashMap<>();
@@ -981,6 +995,39 @@ public class Planner
 		for (RebuildData.Charge charge : charges)
 		{
 			plan.getKeeps().add(new Plan.Keep(charge.getId(), "Charges", "CHARGE", charge.getName(), charge.getQty()));
+		}
+
+		// Is it worth it at all? Compare the rebuilt setup with what the player
+		// does today: their best owned weapon in their current, unsold gear.
+		// Selling half a setup to afford the megarare can leave it barely ahead.
+		final double rebuilt = dps(main, main.current, useVoid);
+		double today = 0;
+		String todayWeapon = null;
+		for (Option weapon : main.otherWeapons)
+		{
+			if (weapon.ownedId < 0 || items.stats(weapon.listId) == null)
+			{
+				continue;
+			}
+			final Map<String, Integer> worn = worn(main, main.start, startVoid);
+			worn.put("WEAPON", weapon.listId);
+			if (!DpsModel.ammoFits(items, weapon.listId, worn.getOrDefault("AMMO", -1)))
+			{
+				worn.remove("AMMO");
+			}
+			final double score = DpsModel.dps(items, main.data.getStyle(), worn, startVoid, levels, main.target,
+				method.getGearMultiplier());
+			if (score > today)
+			{
+				today = score;
+				todayWeapon = weapon.name;
+			}
+		}
+		if (todayWeapon != null && today > 0)
+		{
+			plan.setTodayWeapon(todayWeapon);
+			plan.setGainPct((rebuilt - today) / today * 100);
+			plan.setWorthIt(plan.getGainPct() >= settings.getMinGainPct());
 		}
 
 		final double bestDps = dps(main, bestPossible(main), false);

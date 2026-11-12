@@ -413,8 +413,9 @@ public class RebuildPanel extends PluginPanel
 		for (Plan plan : plans)
 		{
 			if (best == null
-				|| (plan.isFunded() && !best.isFunded())
-				|| (plan.isFunded() == best.isFunded() && (plan.isFunded()
+				|| (plan.isWorthIt() && !best.isWorthIt())
+				|| (plan.isWorthIt() == best.isWorthIt() && plan.isFunded() && !best.isFunded())
+				|| (plan.isWorthIt() == best.isWorthIt() && plan.isFunded() == best.isFunded() && (plan.isFunded()
 					? plan.getEstGpPerHour() > best.getEstGpPerHour()
 					: plan.getShortfall() < best.getShortfall())))
 			{
@@ -600,6 +601,23 @@ public class RebuildPanel extends PluginPanel
 		before = null;
 	}
 
+	/** Items the player's last change caused the plan to add. */
+	private java.util.Set<Integer> recentlyAdded()
+	{
+		final java.util.Set<Integer> ids = new java.util.HashSet<>();
+		if (changes != null)
+		{
+			for (String[] change : changes)
+			{
+				if ("+".equals(change[0]))
+				{
+					ids.add(Integer.parseInt(change[1]));
+				}
+			}
+		}
+		return ids;
+	}
+
 	private void addChanges(Plan plan)
 	{
 		if (changes == null)
@@ -674,9 +692,9 @@ public class RebuildPanel extends PluginPanel
 	{
 		final long target = plan.getGoalPrice() + plan.getBuyCost();
 		final long have = Math.min(target, plan.getCoins() + plan.getRaised());
-		final Color accent = plan.getNeeded() <= 0 || plan.isFunded() ? GOOD : BAD;
+		final Color accent = !plan.isWorthIt() ? BAD : plan.getNeeded() <= 0 || plan.isFunded() ? GOOD : BAD;
 
-		final JPanel card = card(plan.isAlreadyOwned() ? "You already own one" : "The plan", accent);
+		final JPanel card = card(!plan.isWorthIt() ? "Not worth it" : plan.isAlreadyOwned() ? "You already own one" : "The plan", accent);
 
 		final JPanel figures = left(new JPanel(new GridLayout(0, 2, 4, 2)));
 		figures.setBackground(CARD);
@@ -703,7 +721,13 @@ public class RebuildPanel extends PluginPanel
 		card.add(Box.createVerticalStrut(6));
 
 		final String verdict;
-		if (plan.getNeeded() <= 0)
+		if (!plan.isWorthIt())
+		{
+			verdict = String.format("With the gear you would have left, a %s only does %s%.0f%% damage compared with "
+				+ "your %s today. Keep your setup and don't rebuild - or keep fewer things back so less of it has to go.",
+				plan.getGoal().getName(), plan.getGainPct() >= 0 ? "+" : "", plan.getGainPct(), plan.getTodayWeapon());
+		}
+		else if (plan.getNeeded() <= 0)
 		{
 			verdict = "Your coins already cover it. Nothing needs selling.";
 		}
@@ -720,6 +744,11 @@ public class RebuildPanel extends PluginPanel
 					+ "would cost too much damage.";
 		}
 		card.add(text("<b>" + esc(verdict) + "</b>", INNER - 20, accent));
+		if (plan.isWorthIt() && plan.getTodayWeapon() != null)
+		{
+			card.add(text(String.format("+%.0f%% damage over your %s.", plan.getGainPct(), plan.getTodayWeapon()),
+				INNER - 20, MUTED));
+		}
 		addCard(card);
 	}
 
@@ -840,7 +869,7 @@ public class RebuildPanel extends PluginPanel
 				optional += sale.getProceeds();
 			}
 		}
-		if (needed.isEmpty() && optional == 0)
+		if (needed.isEmpty() && optional == 0 && plan.getExcluded().isEmpty())
 		{
 			return;
 		}
@@ -855,7 +884,9 @@ public class RebuildPanel extends PluginPanel
 
 			final JPanel middle = column();
 			middle.setBackground(CARD);
-			middle.add(text("<span style='color:white'>" + esc(sale.getName()) + "</span>", 0, MUTED));
+			final boolean isNew = recentlyAdded().contains(sale.getItemId());
+			middle.add(text("<span style='color:white'>" + esc(sale.getName()) + "</span>"
+				+ (isNew ? " <span style='color:" + hex(WARN) + "'><b>NEW</b></span>" : ""), 0, MUTED));
 
 			if (sale.getHeld() > 1)
 			{
@@ -877,6 +908,18 @@ public class RebuildPanel extends PluginPanel
 			row.add(middle, BorderLayout.CENTER);
 			row.add(button("\u2715", "Don't sell this - the plan will try to make it up elsewhere", BAD,
 				() -> actions.exclude(sale.getItemId())), BorderLayout.EAST);
+			card.add(row);
+		}
+		// What the player chose to keep stays visible here, crossed out.
+		for (Plan.Excluded item : plan.getExcluded())
+		{
+			final JPanel row = left(new JPanel(new BorderLayout(6, 0)));
+			row.setBackground(CARD);
+			row.setBorder(new EmptyBorder(3, 0, 3, 0));
+			row.add(icon(item.getItemId(), 1), BorderLayout.WEST);
+			row.add(text("<s>" + esc(item.getName()) + "</s><br>Keeping", 0, MUTED), BorderLayout.CENTER);
+			row.add(button("\u21BA", "Let the plan sell this again", MUTED,
+				() -> actions.restore(item.getItemId())), BorderLayout.EAST);
 			card.add(row);
 		}
 		card.add(Box.createVerticalStrut(4));
@@ -933,49 +976,23 @@ public class RebuildPanel extends PluginPanel
 		addCard(card);
 	}
 
-	/** What the player has told the plan to keep, with a way back. */
+	/** A way to undo everything at once, shown only after the player has changed something. */
 	private void addExcluded(Plan plan)
 	{
-		if (plan.getExcluded().isEmpty() && !hasOverrides)
+		if (!hasOverrides)
 		{
 			return;
 		}
-		final JPanel card = card("You chose to keep", ColorScheme.LIGHT_GRAY_COLOR);
-		for (Plan.Excluded item : plan.getExcluded())
-		{
-			final JPanel row = left(new JPanel(new BorderLayout(6, 0)));
-			row.setBackground(CARD);
-			row.add(icon(item.getItemId(), 1), BorderLayout.WEST);
-			row.add(text(esc(item.getName()), 0, Color.WHITE), BorderLayout.CENTER);
-			row.add(button("\u21BA", "Allow the plan to sell this again", MUTED,
-				() -> actions.restore(item.getItemId())), BorderLayout.EAST);
-			card.add(row);
-		}
-		if (hasOverrides)
-		{
-			card.add(Box.createVerticalStrut(4));
-			final JLabel reset = left(button("Reset all my changes", "Undo every \u2715 and amount change",
-				ColorScheme.BRAND_ORANGE, actions::resetAll));
-			reset.setFont(FontManager.getRunescapeSmallFont());
-			reset.setHorizontalAlignment(SwingConstants.LEFT);
-			reset.setPreferredSize(null);
-			card.add(reset);
-		}
-		addCard(card);
-	}
-	private void addBuys(Plan plan)
-	{
-		if (plan.getBuys().isEmpty())
-		{
-			return;
-		}
-		final JPanel card = card("Buy for the kit", BAD);
-		for (Plan.Buy buy : plan.getBuys())
-		{
-			card.add(row(buy.getItemId(), 1, buy.getName(),
-				"<span style='color:" + hex(BAD) + "'>-" + gp(buy.getCost()) + "</span> &middot; "
-					+ esc(buy.getRole()), null));
-		}
+		final JPanel card = card("Your changes", ColorScheme.LIGHT_GRAY_COLOR);
+		card.add(text("Items you chose to keep are crossed out in the sell list - click \u21BA there to undo one.",
+			0, MUTED));
+		card.add(Box.createVerticalStrut(4));
+		final JLabel reset = left(button("Reset all my changes", "Undo every \u2715 and amount change",
+			ColorScheme.BRAND_ORANGE, actions::resetAll));
+		reset.setFont(FontManager.getRunescapeSmallFont());
+		reset.setHorizontalAlignment(SwingConstants.LEFT);
+		reset.setPreferredSize(null);
+		card.add(reset);
 		addCard(card);
 	}
 
