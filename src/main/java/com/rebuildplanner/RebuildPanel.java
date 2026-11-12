@@ -11,6 +11,8 @@ import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.GridLayout;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,11 +22,13 @@ import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
+import javax.swing.JEditorPane;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.swing.SwingConstants;
 import javax.swing.border.EmptyBorder;
+import javax.swing.text.View;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
@@ -145,14 +149,70 @@ public class RebuildPanel extends PluginPanel
 		return label;
 	}
 
-	/** Wrapped text; an unwrapped label would widen the whole panel. */
-	private static JLabel text(String html, int width, Color colour)
+	/**
+	 * HTML text that wraps to whatever width the layout hands it.
+	 *
+	 * <p>A fixed pixel width in the HTML clips, because the space left inside
+	 * the sidebar after its scrollbar and padding is not worth guessing at -
+	 * Gear Upgrade learned this twice. This reports a preferred width of 1, so
+	 * it can never widen the panel, and a height measured at its real width.
+	 */
+	private static final class WrappingHtml extends JEditorPane
 	{
-		final JLabel label = left(new JLabel("<html><body style='width:" + width + "px'>"
-			+ html + "</body></html>"));
-		label.setFont(FontManager.getRunescapeSmallFont());
-		label.setForeground(colour);
-		return label;
+		WrappingHtml(String html, Color colour)
+		{
+			super("text/html", "<html><body>" + html + "</body></html>");
+			putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, Boolean.TRUE);
+			setFont(FontManager.getRunescapeSmallFont());
+			setForeground(colour);
+			setEditable(false);
+			setFocusable(false);
+			setOpaque(false);
+			setBorder(null);
+			setHighlighter(null);
+			// Height depends on width, so re-measure once the real width is known.
+			addComponentListener(new ComponentAdapter()
+			{
+				private int lastWidth = -1;
+
+				@Override
+				public void componentResized(ComponentEvent e)
+				{
+					if (getWidth() != lastWidth)
+					{
+						lastWidth = getWidth();
+						revalidate();
+					}
+				}
+			});
+		}
+
+		@Override
+		public Dimension getPreferredSize()
+		{
+			final int width = getWidth() > 0 ? getWidth() : PluginPanel.PANEL_WIDTH - 60;
+			final View root = getUI().getRootView(this);
+			root.setSize(width, Integer.MAX_VALUE);
+			return new Dimension(1, (int) Math.ceil(root.getPreferredSpan(View.Y_AXIS)));
+		}
+
+		@Override
+		public Dimension getMinimumSize()
+		{
+			return getPreferredSize();
+		}
+
+		@Override
+		public Dimension getMaximumSize()
+		{
+			return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+		}
+	}
+
+	/** Wrapped text; the width argument is ignored, kept so call sites read the same. */
+	private static JComponent text(String html, int width, Color colour)
+	{
+		return left(new WrappingHtml(html, colour));
 	}
 
 	private static String esc(String s)
@@ -191,7 +251,6 @@ public class RebuildPanel extends PluginPanel
 
 	private void addCard(JPanel card)
 	{
-		card.setMaximumSize(new Dimension(INNER, Integer.MAX_VALUE));
 		content.add(card);
 		content.add(Box.createVerticalStrut(8));
 	}
@@ -394,8 +453,8 @@ public class RebuildPanel extends PluginPanel
 		bar.setBorderPainted(false);
 		bar.setStringPainted(true);
 		bar.setString(gp(have) + " / " + gp(target));
-		bar.setPreferredSize(new Dimension(INNER - 20, 16));
-		bar.setMaximumSize(new Dimension(INNER - 20, 16));
+		bar.setPreferredSize(new Dimension(1, 16));
+		bar.setMaximumSize(new Dimension(Integer.MAX_VALUE, 16));
 		card.add(bar);
 		card.add(Box.createVerticalStrut(6));
 
