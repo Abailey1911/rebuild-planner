@@ -79,6 +79,8 @@ public class RebuildPlannerPlugin extends Plugin
 
 	/** Set when holdings change; the plan is rebuilt once on the next tick. */
 	private boolean dirty;
+	/** Set when potion storage may have changed; it is re-read on the next tick. */
+	private boolean potionsDirty;
 
 	@Override
 	protected void startUp()
@@ -143,16 +145,21 @@ public class RebuildPlannerPlugin extends Plugin
 		{
 			holdings.refresh(id);
 			dirty = true;
+			if (id == InventoryID.BANK)
+			{
+				potionsDirty = true;
+			}
 		}
 	}
 
 	@Subscribe
 	public void onVarbitChanged(VarbitChanged event)
 	{
+		// Reading potion storage runs client scripts, which cannot be started from
+		// inside an event a script fired. Flag it and read on the next tick.
 		if (holdings.isBankSeen() && Holdings.isPotionStoreVarp(event.getVarpId()))
 		{
-			holdings.refreshPotionStore();
-			dirty = true;
+			potionsDirty = true;
 		}
 	}
 
@@ -168,6 +175,19 @@ public class RebuildPlannerPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
+		if (potionsDirty)
+		{
+			potionsDirty = false;
+			try
+			{
+				holdings.refreshPotionStore();
+			}
+			catch (RuntimeException | AssertionError e)
+			{
+				log.debug("Could not read potion storage", e);
+			}
+			dirty = true;
+		}
 		if (dirty)
 		{
 			dirty = false;

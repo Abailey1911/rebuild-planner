@@ -52,7 +52,6 @@ public class Holdings
 		if (containerId == InventoryID.BANK)
 		{
 			bankSeen = true;
-			refreshPotionStore();
 		}
 
 		final Map<Integer, Long> items = new HashMap<>();
