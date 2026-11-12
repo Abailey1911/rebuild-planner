@@ -23,12 +23,20 @@ import lombok.Value;
  * Works out how to afford a megarare without selling the gear needed to make
  * the money back with it.
  *
- * <p>The order things are sold in is the whole point:
+ * <p>Every setup the method needs - the one the megarare is used in, and any
+ * raid switches - is picked the way Gear Upgrade picks gear: the wiki table
+ * decides what is eligible, and damage decides what is worn, so set bonuses,
+ * two-handed weapons and ammunition all sort themselves out. A Bow of
+ * faerdhinen pulls in the crystal set and leaves Masori spare; a Fang with a
+ * defender can beat a two-handed halberd.
+ *
+ * <p>Then money is raised in this order:
  * <ol>
- *   <li>anything in the bank that is not part of the kit, keeping a working
- *       reserve of supplies;</li>
- *   <li>expensive switch pieces, replaced by cheaper ones - a switch only has
- *       to exist;</li>
+ *   <li>anything the setups do not use, keeping a working reserve of
+ *       supplies;</li>
+ *   <li>switches, sold down a price tier at a time. Each tier is rebuilt as a
+ *       whole kit from what is left plus cheap buys, so a switch never ends up
+ *       as an Oathplate chest over mixed hide legs;</li>
  *   <li>pieces of the main setup, cheapest damage first, and only up to a
  *       cap - selling Ancestral to afford a Tumeken's shadow defeats the
  *       purpose.</li>
@@ -47,8 +55,16 @@ public class Planner
 	private static final int VOID_MELEE_HELM = 11665;
 	private static final List<String> VOID_SLOTS = Arrays.asList("HEAD", "BODY", "LEGS", "GLOVES");
 
-	/** A kit piece cheaper than this is not worth swapping out. */
+	/** A piece cheaper than this is not worth swapping out. */
 	private static final long MIN_SWAP_VALUE = 500_000;
+
+	/** Price tiers a switch is sold down through, most expensive first. */
+	private static final long[] SWITCH_TIERS = {
+		150_000_000, 80_000_000, 40_000_000, 20_000_000, 10_000_000, 5_000_000, 2_000_000,
+	};
+
+	/** Cheaper ammunition is used when it costs at most this share of damage. */
+	private static final double AMMO_TOLERANCE = 0.03;
 
 	private static final Pattern SUPPLY = Pattern.compile(
 		"(\\(\\d\\)$)|( rune$)|(arrow)|(bolts)|(dart$)|(javelin)|(scales$)|(chinchompa)|(cannonball)"
@@ -64,6 +80,8 @@ public class Planner
 		long supplyReserve;
 		/** Most damage the main setup may give up, in percent. */
 		double maxDpsLossPct;
+		/** Most damage a switch may give up, in percent. */
+		double maxSwitchLossPct;
 	}
 
 	/** One entry in a slot's ranked list. */
@@ -73,7 +91,7 @@ public class Planner
 		final int rank;
 		final String name;
 		/** The id actually held (the item or a cosmetic form of it), or -1. */
-		int ownedId;
+		final int ownedId;
 
 		Option(int listId, int rank, String name, int ownedId)
 		{
@@ -84,8 +102,77 @@ public class Planner
 		}
 	}
 
+	/** One setup the method needs, and what is chosen for it. */
+	private static final class Role
+	{
+		final RebuildData.Role data;
+		final boolean main;
+		final String label;
+		final RebuildData.Target target;
+		final Map<String, List<Option>> slots = new LinkedHashMap<>();
+		/** As the player owns it, before anything is sold. */
+		Map<String, Option> start;
+		/** As it stands now. */
+		Map<String, Option> current;
+		double startDps;
+
+		Role(RebuildData.Role data, RebuildData.Method method)
+		{
+			this.data = data;
+			this.main = data.isMain();
+			final String style = data.getStyle().charAt(0) + data.getStyle().substring(1).toLowerCase(Locale.ROOT);
+			this.label = main ? style : style + " switch";
+			this.target = data.getTarget() != null ? data.getTarget() : method.getTarget();
+		}
+	}
+
+	/** Who may wear what, at a given price tier. */
+	private final class Rules
+	{
+		final long tier;
+		final boolean allowBuy;
+
+		Rules(long tier, boolean allowBuy)
+		{
+			this.tier = tier;
+			this.allowBuy = allowBuy;
+		}
+
+		/** -1 when the option may not be used; 0 when it is owned and kept; else its cost. */
+		long cost(Option option)
+		{
+			if (option.ownedId >= 0 && !sold.contains(option.ownedId))
+			{
+				final long price = items.price(option.ownedId);
+				final boolean protectedItem = excluded.contains(option.ownedId)
+					|| mainKept.contains(option.ownedId) || !items.tradeable(option.ownedId);
+				if (protectedItem || price <= tier)
+				{
+					return 0;
+				}
+			}
+			if (!allowBuy || goalIds.contains(option.listId) || !items.tradeable(option.listId))
+			{
+				return -1;
+			}
+			final long price = items.price(option.listId);
+			return price > 0 && price <= tier ? price : -1;
+		}
+	}
+
 	private final ItemInfo items;
 	private final Map<String, List<Integer>> variants;
+
+	// Per-plan state, reset by plan().
+	private RebuildData.Goal goal;
+	private RebuildData.Method method;
+	private DpsModel.Levels levels;
+	private Settings settings;
+	private Map<Integer, Long> owned;
+	private Set<Integer> goalIds;
+	private Set<Integer> excluded;
+	private final Set<Integer> sold = new HashSet<>();
+	private final Set<Integer> mainKept = new HashSet<>();
 
 	public Planner(ItemInfo items, Map<String, List<Integer>> variants)
 	{
@@ -98,7 +185,7 @@ public class Planner
 		return price < 50 ? 0 : Math.min(5_000_000L, price / 50);
 	}
 
-	private long net(long price)
+	private static long net(long price)
 	{
 		return price - geTax(price);
 	}
@@ -108,7 +195,7 @@ public class Planner
 		return name != null && SUPPLY.matcher(name.toLowerCase(Locale.ROOT)).find();
 	}
 
-	private int ownedForm(int itemId, Map<Integer, Long> owned)
+	private int ownedForm(int itemId)
 	{
 		if (owned.getOrDefault(itemId, 0L) > 0)
 		{
@@ -124,28 +211,6 @@ public class Planner
 		return -1;
 	}
 
-	private List<Option> options(RebuildData.Slot slot, Map<Integer, Long> owned, Set<Integer> exclude)
-	{
-		final List<Option> out = new ArrayList<>();
-		for (int i = 0; i < slot.getIds().size(); i++)
-		{
-			final int id = slot.getIds().get(i);
-			if (exclude.contains(id))
-			{
-				continue;
-			}
-			final String name = i < slot.getItems().size() ? slot.getItems().get(i) : items.name(id);
-			out.add(new Option(id, i, name, ownedForm(id, owned)));
-		}
-		return out;
-	}
-
-	private static String label(RebuildData.Role role)
-	{
-		final String style = role.getStyle().charAt(0) + role.getStyle().substring(1).toLowerCase(Locale.ROOT);
-		return role.isMain() ? style : style + " switch";
-	}
-
 	private int voidHelm(String style)
 	{
 		switch (style)
@@ -159,40 +224,229 @@ public class Planner
 		}
 	}
 
-	private double score(RebuildData.Goal goal, RebuildData.Method method,
-						 Map<String, Option> picks, boolean useVoid, DpsModel.Levels levels)
+	private long ammoReserve(int itemId)
 	{
-		final DpsModel.Totals totals = new DpsModel.Totals();
-		totals.add(items.stats(goal.getId()));
-		for (Map.Entry<String, Option> entry : picks.entrySet())
+		final long price = Math.max(1, items.price(itemId));
+		return Math.max(1, (settings.getSupplyReserve() + price - 1) / price);
+	}
+
+	private String lower(int itemId)
+	{
+		final String name = itemId > 0 ? items.name(itemId) : null;
+		return name == null ? "" : name.toLowerCase(Locale.ROOT);
+	}
+
+	// ---- Scoring and choosing ----------------------------------------------
+
+	private Map<String, Integer> worn(Role role, Map<String, Option> loadout, boolean useVoid)
+	{
+		final Map<String, Integer> worn = new HashMap<>();
+		for (Map.Entry<String, Option> entry : loadout.entrySet())
 		{
-			if (entry.getValue() == null || (useVoid && VOID_SLOTS.contains(entry.getKey())))
+			if (entry.getValue() != null && !(useVoid && VOID_SLOTS.contains(entry.getKey())))
 			{
-				continue;
+				worn.put(entry.getKey(), entry.getValue().listId);
 			}
-			totals.add(items.stats(entry.getValue().listId));
+		}
+		if (role.main)
+		{
+			worn.put("WEAPON", goal.getId());
 		}
 		if (useVoid)
 		{
-			totals.add(items.stats(ELITE_VOID_TOP));
-			totals.add(items.stats(ELITE_VOID_ROBE));
-			totals.add(items.stats(VOID_GLOVES));
-			totals.add(items.stats(voidHelm(goal.getStyle())));
-			totals.eliteVoid = true;
+			worn.put("HEAD", voidHelm(role.data.getStyle()));
+			worn.put("BODY", ELITE_VOID_TOP);
+			worn.put("LEGS", ELITE_VOID_ROBE);
+			worn.put("GLOVES", VOID_GLOVES);
 		}
-		return DpsModel.score(goal.getStyle(), totals, levels, method.getTarget(),
-			method.getGearMultiplier());
+		return worn;
 	}
 
-	/** The option to buy for a slot the player has nothing in. */
-	private Option cheapFill(List<Option> options, long goalPrice)
+	private double dps(Role role, Map<String, Option> loadout, boolean useVoid)
+	{
+		return DpsModel.dps(items, role.data.getStyle(), worn(role, loadout, useVoid), useVoid, levels,
+			role.target, method.getGearMultiplier());
+	}
+
+	private int weaponId(Role role, Map<String, Option> loadout)
+	{
+		if (role.main)
+		{
+			return goal.getId();
+		}
+		final Option weapon = loadout.get("WEAPON");
+		return weapon == null ? -1 : weapon.listId;
+	}
+
+	private boolean twoHanded(Role role, Map<String, Option> loadout)
+	{
+		final int weapon = weaponId(role, loadout);
+		final ItemInfo.Stats stats = weapon > 0 ? items.stats(weapon) : null;
+		return stats != null && stats.isTwoHanded();
+	}
+
+	private boolean isAmmunition(Option option)
+	{
+		return DpsModel.kindOf(lower(option.listId)) != DpsModel.Ammo.NONE;
+	}
+
+	/**
+	 * The highest-damage setup for a role under the given rules: each weapon
+	 * tried in turn, then every other slot settled around it.
+	 */
+	private Map<String, Option> choose(Role role, Rules rules, boolean useVoid)
+	{
+		return choose(role, rules, useVoid, null);
+	}
+
+	/** As above, but around a given weapon, when the switch's weapon has to be bought. */
+	private Map<String, Option> choose(Role role, Rules rules, boolean useVoid, Option forcedWeapon)
+	{
+		final List<Option> weapons = new ArrayList<>();
+		if (forcedWeapon != null)
+		{
+			weapons.add(forcedWeapon);
+		}
+		else if (role.main)
+		{
+			weapons.add(null);
+		}
+		else
+		{
+			for (Option option : role.slots.getOrDefault("WEAPON", Collections.emptyList()))
+			{
+				if (rules.cost(option) >= 0 && items.stats(option.listId) != null)
+				{
+					weapons.add(option);
+				}
+			}
+		}
+
+		Map<String, Option> best = null;
+		double bestScore = -1;
+		long bestCost = Long.MAX_VALUE;
+		for (Option weapon : weapons)
+		{
+			final Map<String, Option> loadout = new LinkedHashMap<>();
+			for (String slot : role.slots.keySet())
+			{
+				loadout.put(slot, null);
+			}
+			if (!role.main)
+			{
+				loadout.put("WEAPON", weapon);
+			}
+			final boolean twoHanded = twoHanded(role, loadout);
+			final int weaponId = weaponId(role, loadout);
+
+			for (int pass = 0; pass < 2; pass++)
+			{
+				for (Map.Entry<String, List<Option>> entry : role.slots.entrySet())
+				{
+					final String slot = entry.getKey();
+					if ("WEAPON".equals(slot) || ("SHIELD".equals(slot) && twoHanded)
+						|| (useVoid && VOID_SLOTS.contains(slot)))
+					{
+						continue;
+					}
+					Option pick = loadout.get(slot);
+					double pickScore = dps(role, loadout, useVoid);
+					long pickCost = pick == null ? 0 : rules.cost(pick);
+					for (Option option : entry.getValue())
+					{
+						final long cost = rules.cost(option);
+						if (cost < 0 || ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
+						{
+							continue;
+						}
+						loadout.put(slot, option);
+						final double score = dps(role, loadout, useVoid);
+						// Better damage wins; on a tie the cheaper item, and an
+						// owned piece over an empty slot.
+						if (score > pickScore + 1e-9
+							|| (score > pickScore - 1e-9 && (pick == null ? cost == 0 : cost < pickCost)))
+						{
+							pick = option;
+							pickScore = score;
+							pickCost = cost;
+						}
+					}
+					loadout.put(slot, pick);
+				}
+			}
+			cheaperAmmo(role, loadout, rules, useVoid);
+
+			final double score = dps(role, loadout, useVoid);
+			final long cost = cost(loadout, rules);
+			if (score > bestScore + 1e-9 || (score > bestScore - 1e-9 && cost < bestCost))
+			{
+				best = loadout;
+				bestScore = score;
+				bestCost = cost;
+			}
+		}
+		return best;
+	}
+
+	/**
+	 * Ammunition is a consumable, so the best arrow is not worth it when a much
+	 * cheaper one does nearly the same damage - Seeking dragon arrows against
+	 * amethyst, say.
+	 */
+	private void cheaperAmmo(Role role, Map<String, Option> loadout, Rules rules, boolean useVoid)
+	{
+		final Option current = loadout.get("AMMO");
+		if (current == null || !isAmmunition(current))
+		{
+			return;
+		}
+		final double best = dps(role, loadout, useVoid);
+		final int weaponId = weaponId(role, loadout);
+		Option cheapest = current;
+		for (Option option : role.slots.getOrDefault("AMMO", Collections.emptyList()))
+		{
+			if (rules.cost(option) < 0 || !isAmmunition(option)
+				|| !DpsModel.ammoFits(items, weaponId, option.listId))
+			{
+				continue;
+			}
+			loadout.put("AMMO", option);
+			if (dps(role, loadout, useVoid) >= best * (1 - AMMO_TOLERANCE)
+				&& items.price(option.listId) < items.price(cheapest.listId))
+			{
+				cheapest = option;
+			}
+		}
+		loadout.put("AMMO", cheapest);
+	}
+
+	/** What a loadout costs to buy under the rules; ammunition by the stack. */
+	private long cost(Map<String, Option> loadout, Rules rules)
+	{
+		long total = 0;
+		for (Map.Entry<String, Option> entry : loadout.entrySet())
+		{
+			final Option option = entry.getValue();
+			if (option == null)
+			{
+				continue;
+			}
+			final long cost = Math.max(0, rules.cost(option));
+			total += "AMMO".equals(entry.getKey()) && cost > 0 ? cost * ammoReserve(option.listId) : cost;
+		}
+		return total;
+	}
+
+	/** The cheapest sensible thing to buy for a slot the player has nothing in. */
+	private Option cheapFill(String slot, List<Option> options, long goalPrice, int weaponId)
 	{
 		Option best = null;
 		Option cheapest = null;
 		for (Option option : options)
 		{
 			final long price = items.price(option.listId);
-			if (price <= 0 || !items.tradeable(option.listId))
+			if (price <= 0 || !items.tradeable(option.listId) || goalIds.contains(option.listId)
+				|| ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
 			{
 				continue;
 			}
@@ -208,222 +462,193 @@ public class Planner
 		return best != null ? best : cheapest;
 	}
 
+	// ---- Planning ----------------------------------------------------------
+
 	public Plan plan(RebuildData.Goal goal, RebuildData.Method method, Map<Integer, Long> owned,
-					 long coins, DpsModel.Levels levels, Settings settings)
+					 long coins, DpsModel.Levels levels, Settings settings, Overrides overrides)
 	{
+		this.goal = goal;
+		this.method = method;
+		this.levels = levels;
+		this.settings = settings;
+		this.owned = owned;
+		this.goalIds = new HashSet<>(Arrays.asList(goal.getId(), goal.getBuyId()));
+		this.excluded = overrides == null ? Collections.emptySet() : overrides.getExcluded();
+		final Map<Integer, Long> customQty = overrides == null
+			? Collections.emptyMap() : overrides.getSellQuantity();
+		sold.clear();
+		mainKept.clear();
+
 		final Plan plan = new Plan();
 		plan.setGoal(goal);
 		plan.setMethod(method);
 		plan.setCoins(coins);
 		plan.setGoalPrice(items.price(goal.getBuyId()));
-		plan.setAlreadyOwned(ownedForm(goal.getId(), owned) >= 0 || ownedForm(goal.getBuyId(), owned) >= 0);
+		plan.setAlreadyOwned(ownedForm(goal.getId()) >= 0 || ownedForm(goal.getBuyId()) >= 0);
 
-		final Set<Integer> goalIds = new HashSet<>(Arrays.asList(goal.getId(), goal.getBuyId()));
-		final ItemInfo.Stats goalStats = items.stats(goal.getId());
-		final boolean twoHanded = goalStats == null || goalStats.isTwoHanded();
-
-		// ---- Main setup -------------------------------------------------
-		RebuildData.Role mainRole = null;
-		for (RebuildData.Role role : method.getRoles())
+		// ---- Every setup, as the player owns it ---------------------------
+		final List<Role> roles = new ArrayList<>();
+		Role main = null;
+		for (RebuildData.Role data : method.getRoles())
 		{
-			if (role.isMain())
+			final Role role = new Role(data, method);
+			for (RebuildData.Slot slot : data.getSlots())
 			{
-				mainRole = role;
-			}
-		}
-
-		final Map<String, List<Option>> mainOptions = new LinkedHashMap<>();
-		final Map<String, Option> picks = new LinkedHashMap<>();
-		final Map<String, Option> bestPossible = new LinkedHashMap<>();
-		if (mainRole != null)
-		{
-			for (RebuildData.Slot slot : mainRole.getSlots())
-			{
-				if ("WEAPON".equals(slot.getSlot()) || ("SHIELD".equals(slot.getSlot()) && twoHanded))
+				if (role.main && "WEAPON".equals(slot.getSlot()))
 				{
 					continue;
 				}
-				final List<Option> options = options(slot, owned, goalIds);
-				mainOptions.put(slot.getSlot(), options);
-
-				Option top = null;
-				Option first = null;
-				for (Option option : options)
+				final List<Option> options = new ArrayList<>();
+				for (int i = 0; i < slot.getIds().size(); i++)
 				{
-					if (first == null && items.stats(option.listId) != null)
-					{
-						first = option;
-					}
-					if (top == null && option.ownedId >= 0)
-					{
-						top = option;
-					}
-				}
-				picks.put(slot.getSlot(), top);
-				bestPossible.put(slot.getSlot(), first);
-			}
-		}
-
-		// List order is the wiki's, but the damage model decides what is worn.
-		for (int pass = 0; pass < 2; pass++)
-		{
-			for (Map.Entry<String, List<Option>> entry : mainOptions.entrySet())
-			{
-				Option best = picks.get(entry.getKey());
-				double bestScore = score(goal, method, picks, false, levels);
-				for (Option option : entry.getValue())
-				{
-					if (option.ownedId < 0)
+					final int id = slot.getIds().get(i);
+					if (goalIds.contains(id))
 					{
 						continue;
 					}
-					picks.put(entry.getKey(), option);
-					final double s = score(goal, method, picks, false, levels);
-					if (s > bestScore + 1e-9)
-					{
-						bestScore = s;
-						best = option;
-					}
+					final String name = i < slot.getItems().size() ? slot.getItems().get(i) : items.name(id);
+					options.add(new Option(id, i, name, ownedForm(id)));
 				}
-				picks.put(entry.getKey(), best);
+				role.slots.put(slot.getSlot(), options);
 			}
-		}
-
-		final boolean voidOwned = ownedForm(ELITE_VOID_TOP, owned) >= 0
-			&& ownedForm(ELITE_VOID_ROBE, owned) >= 0
-			&& ownedForm(VOID_GLOVES, owned) >= 0
-			&& ownedForm(voidHelm(goal.getStyle()), owned) >= 0;
-		boolean useVoid = voidOwned
-			&& score(goal, method, picks, true, levels) > score(goal, method, picks, false, levels);
-
-		// Gear the method needs and the player has none of.
-		long buyCost = 0;
-		if (mainRole != null)
-		{
-			for (Map.Entry<String, List<Option>> entry : mainOptions.entrySet())
+			if (role.main)
 			{
-				if (picks.get(entry.getKey()) != null || (useVoid && VOID_SLOTS.contains(entry.getKey())))
-				{
-					continue;
-				}
-				final Option fill = cheapFill(entry.getValue(), plan.getGoalPrice());
-				if (fill != null)
-				{
-					final long cost = items.price(fill.listId);
-					plan.getBuys().add(new Plan.Buy(fill.listId, label(mainRole), entry.getKey(), fill.name, cost));
-					buyCost += cost;
-					picks.put(entry.getKey(), fill);
-				}
+				main = role;
+			}
+			else
+			{
+				roles.add(role);
 			}
 		}
-
-		final double bestScore = score(goal, method, bestPossible, false, levels);
-		final double ownedScore = score(goal, method, picks, useVoid, levels);
-
-		// ---- Switches ---------------------------------------------------
-		final Map<Integer, Long> keepQty = new HashMap<>();
-		final Set<Integer> mainKept = new HashSet<>();
-		final Set<Integer> ammoKept = new HashSet<>();
-
-		/** A switch piece the player is holding on to. */
-		final class SwitchKeep
+		if (main == null)
 		{
-			RebuildData.Role role;
-			String slot;
-			Option pick;
-			List<Option> options;
+			return plan;
 		}
-		final List<SwitchKeep> switchKeeps = new ArrayList<>();
+		roles.add(0, main);
 
-		for (RebuildData.Role role : method.getRoles())
+		final Rules ownedOnly = new Rules(Long.MAX_VALUE, false);
+		long buyCost = 0;
+
+		// The main setup.
+		main.current = choose(main, ownedOnly, false);
+		final boolean voidOwned = ownedForm(ELITE_VOID_TOP) >= 0 && ownedForm(ELITE_VOID_ROBE) >= 0
+			&& ownedForm(VOID_GLOVES) >= 0 && ownedForm(voidHelm(main.data.getStyle())) >= 0;
+		boolean useVoid = false;
+		if (voidOwned)
 		{
-			if (role.isMain())
+			final Map<String, Option> withVoid = choose(main, ownedOnly, true);
+			if (dps(main, withVoid, true) > dps(main, main.current, false))
+			{
+				main.current = withVoid;
+				useVoid = true;
+			}
+		}
+		// Slots with nothing at all: buy something cheap to fill them.
+		for (Map.Entry<String, List<Option>> entry : main.slots.entrySet())
+		{
+			final String slot = entry.getKey();
+			if (main.current.get(slot) != null || (useVoid && VOID_SLOTS.contains(slot))
+				|| ("SHIELD".equals(slot) && twoHanded(main, main.current)))
 			{
 				continue;
 			}
-			for (RebuildData.Slot slot : role.getSlots())
+			final Option fill = cheapFill(slot, entry.getValue(), plan.getGoalPrice(), goal.getId());
+			if (fill != null)
 			{
-				if ("SHIELD".equals(slot.getSlot()))
-				{
-					continue;
-				}
-				final List<Option> options = options(slot, owned, goalIds);
-				Option top = null;
-				for (Option option : options)
-				{
-					if (option.ownedId >= 0)
-					{
-						top = option;
-						break;
-					}
-				}
-				if (top == null)
-				{
-					if ("WEAPON".equals(slot.getSlot()))
-					{
-						final Option fill = cheapFill(options, plan.getGoalPrice());
-						if (fill != null)
-						{
-							final long cost = items.price(fill.listId);
-							plan.getBuys().add(new Plan.Buy(fill.listId, label(role), slot.getSlot(), fill.name, cost));
-							buyCost += cost;
-						}
-					}
-					continue;
-				}
-				final SwitchKeep keep = new SwitchKeep();
-				keep.role = role;
-				keep.slot = slot.getSlot();
-				keep.pick = top;
-				keep.options = options;
-				switchKeeps.add(keep);
+				final long qty = "AMMO".equals(slot) && isAmmunition(fill) ? ammoReserve(fill.listId) : 1;
+				final long cost = items.price(fill.listId) * qty;
+				plan.getBuys().add(new Plan.Buy(fill.listId, main.label, slot, fill.name, qty, cost));
+				buyCost += cost;
+				main.current.put(slot, new Option(fill.listId, fill.rank, fill.name, -1));
 			}
+		}
+		main.start = new LinkedHashMap<>(main.current);
+		main.startDps = dps(main, main.current, useVoid);
+		for (Option option : main.current.values())
+		{
+			if (option != null && option.ownedId >= 0)
+			{
+				mainKept.add(option.ownedId);
+			}
+		}
+
+		// The switches, around what the main setup keeps.
+		for (Role role : roles)
+		{
+			if (role.main)
+			{
+				continue;
+			}
+			role.current = choose(role, ownedOnly, false);
+			if (role.current == null)
+			{
+				// Owns no weapon for this switch at all: buy a cheap one.
+				role.current = new LinkedHashMap<>();
+				for (String slot : role.slots.keySet())
+				{
+					role.current.put(slot, null);
+				}
+				final Option fill = cheapFill("WEAPON", role.slots.getOrDefault("WEAPON", Collections.emptyList()),
+					plan.getGoalPrice(), -1);
+				if (fill != null)
+				{
+					final long cost = items.price(fill.listId);
+					plan.getBuys().add(new Plan.Buy(fill.listId, role.label, "WEAPON", fill.name, 1, cost));
+					buyCost += cost;
+					final Option bought = new Option(fill.listId, fill.rank, fill.name, -1);
+					final Map<String, Option> around = choose(role, ownedOnly, false, bought);
+					if (around != null)
+					{
+						role.current = around;
+					}
+					role.current.put("WEAPON", bought);
+				}
+			}
+			role.start = new LinkedHashMap<>(role.current);
+			role.startDps = dps(role, role.current, false);
 		}
 
 		plan.setBuyCost(buyCost);
 		plan.setUsesVoid(useVoid);
 
+		// ---- What the kit holds on to --------------------------------------
+		final Map<Integer, Long> keepQty = new HashMap<>();
+		final Set<Integer> keptAmmo = new HashSet<>();
+		for (Role role : roles)
+		{
+			for (Map.Entry<String, Option> entry : role.current.entrySet())
+			{
+				final Option option = entry.getValue();
+				if (option == null || option.ownedId < 0
+					|| (role.main && useVoid && VOID_SLOTS.contains(entry.getKey())))
+				{
+					continue;
+				}
+				keepQty.put(option.ownedId, 1L);
+				if ("AMMO".equals(entry.getKey()))
+				{
+					keptAmmo.add(option.ownedId);
+				}
+			}
+		}
 		if (useVoid)
 		{
-			for (int id : new int[]{ELITE_VOID_TOP, ELITE_VOID_ROBE, VOID_GLOVES, voidHelm(goal.getStyle())})
+			for (int id : new int[]{ELITE_VOID_TOP, ELITE_VOID_ROBE, VOID_GLOVES, voidHelm(main.data.getStyle())})
 			{
-				keepQty.put(ownedForm(id, owned), 1L);
-			}
-		}
-		for (Map.Entry<String, Option> entry : picks.entrySet())
-		{
-			final Option pick = entry.getValue();
-			if (pick == null || pick.ownedId < 0 || (useVoid && VOID_SLOTS.contains(entry.getKey())))
-			{
-				continue;
-			}
-			keepQty.put(pick.ownedId, 1L);
-			mainKept.add(pick.ownedId);
-			if ("AMMO".equals(entry.getKey()))
-			{
-				ammoKept.add(pick.ownedId);
-			}
-		}
-		for (SwitchKeep keep : switchKeeps)
-		{
-			keepQty.put(keep.pick.ownedId, 1L);
-			if ("AMMO".equals(keep.slot))
-			{
-				ammoKept.add(keep.pick.ownedId);
+				keepQty.put(ownedForm(id), 1L);
 			}
 		}
 
-		// ---- 1. Everything that is not kit ------------------------------
+		// ---- 1. Everything the kit does not use ----------------------------
 		final long need = Math.max(0, plan.getGoalPrice() + buyCost - coins);
 		plan.setNeeded(need);
 
-		final Map<Integer, Plan.Sale> saleById = new HashMap<>();
 		final List<Plan.Sale> pool = new ArrayList<>();
 		for (Map.Entry<Integer, Long> entry : owned.entrySet())
 		{
 			final int id = entry.getKey();
-			final long qty = entry.getValue();
-			if (id == COINS || id == PLATINUM_TOKEN || goalIds.contains(id) || qty <= 0
+			final long held = entry.getValue();
+			if (id == COINS || id == PLATINUM_TOKEN || goalIds.contains(id) || held <= 0
 				|| !items.tradeable(id))
 			{
 				continue;
@@ -433,131 +658,135 @@ public class Planner
 			{
 				continue;
 			}
-
 			final String name = items.name(id);
-			long keep = keepQty.getOrDefault(id, 0L);
-			if (ammoKept.contains(id) || (qty > 1 && isSupply(name)))
+			if (excluded.contains(id))
 			{
-				final long reserve = (settings.getSupplyReserve() + price - 1) / price;
-				keep = Math.max(keep, Math.min(qty, reserve));
-			}
-
-			final long sell = qty - keep;
-			if (sell <= 0 || sell * price < settings.getMinStackValue())
-			{
+				if (price * held >= settings.getMinStackValue() && !keepQty.containsKey(id))
+				{
+					plan.getExcluded().add(new Plan.Excluded(id, name));
+				}
 				continue;
 			}
-			pool.add(new Plan.Sale(id, name, sell, keep, sell * net(price), true));
+
+			final long kitKeep = keepQty.getOrDefault(id, 0L);
+			final Long custom = customQty.get(id);
+			final long sell;
+			if (custom != null)
+			{
+				sell = Math.max(0, Math.min(held - kitKeep, custom));
+			}
+			else
+			{
+				long keep = kitKeep;
+				// Ammunition is only worth holding back if a weapon in the kit fires it:
+				// ruby dragon bolts are dead weight in a Twisted bow rebuild.
+				final boolean ammunition = DpsModel.kindOf(lower(id)) != DpsModel.Ammo.NONE;
+				if (keptAmmo.contains(id) || (held > 1 && !ammunition && isSupply(name)))
+				{
+					keep = Math.max(keep, Math.min(held, ammoReserve(id)));
+				}
+				sell = held - keep;
+				if (sell <= 0 || sell * price < settings.getMinStackValue())
+				{
+					continue;
+				}
+			}
+			pool.add(new Plan.Sale(id, name, sell, held - sell, held, sell * net(price), true, custom != null));
 		}
-		pool.sort(Comparator.comparingLong(Plan.Sale::getProceeds).reversed());
+		// Player-set quantities first, then the biggest earners.
+		pool.sort(Comparator.comparing(Plan.Sale::isCustom).reversed()
+			.thenComparing(Comparator.comparingLong(Plan.Sale::getProceeds).reversed()));
 
 		long raised = 0;
 		for (Plan.Sale sale : pool)
 		{
-			final Plan.Sale line = raised >= need
-				? new Plan.Sale(sale.getItemId(), sale.getName(), sale.getQuantity(), sale.getKept(),
-					sale.getProceeds(), false)
-				: sale;
-			if (line.isNeeded())
+			final boolean needed = sale.isCustom() || raised < need;
+			if (needed)
 			{
-				raised += line.getProceeds();
+				raised += sale.getProceeds();
 			}
-			plan.getSales().add(line);
-			saleById.put(line.getItemId(), line);
+			plan.getSales().add(new Plan.Sale(sale.getItemId(), sale.getName(), sale.getQuantity(),
+				sale.getKept(), sale.getHeld(), sale.getProceeds(), needed, sale.isCustom()));
 		}
 
-		long kitSold = 0;
-
-		// Everything sold so far. A sold item cannot also be the replacement:
-		// owning Masori body (f) counts as owning a Masori body, so without this
-		// the (f) was "swapped" for itself and its price counted again and again.
-		final Set<Integer> sold = new HashSet<>();
-
-		// ---- 2. Expensive switches --------------------------------------
-		if (raised < need)
+		// ---- 2. Switches, a price tier at a time ---------------------------
+		final Map<Role, Integer> tier = new HashMap<>();
+		final Map<Role, Long> roleFreed = new HashMap<>();
+		final Map<Role, Map<Integer, Map<String, Option>>> tierCache = new HashMap<>();
+		while (raised < need)
 		{
-			final List<Object[]> moves = new ArrayList<>();
-			for (SwitchKeep keep : switchKeeps)
+			Role bestRole = null;
+			int bestTier = -1;
+			Map<String, Option> bestLoadout = null;
+			long bestFreed = 0;
+			double bestRatio = 0;
+
+			for (Role role : roles)
 			{
-				final int soldId = keep.pick.ownedId;
-				final long price = items.price(soldId);
-				if (mainKept.contains(soldId) || !items.tradeable(soldId) || price < MIN_SWAP_VALUE)
+				if (role.main || role.startDps <= 0)
 				{
 					continue;
 				}
-
-				Option replacement = null;
-				long replacementCost = 0;
-				for (Option option : keep.options)
+				final long freedSoFar = roleFreed.getOrDefault(role, 0L);
+				final double lossSoFar = loss(role, role.current);
+				for (int t = tier.getOrDefault(role, -1) + 1; t < SWITCH_TIERS.length; t++)
 				{
-					if (option.rank > keep.pick.rank && option.ownedId >= 0 && option.ownedId != soldId
-						&& !sold.contains(option.ownedId))
+					final Rules rules = new Rules(SWITCH_TIERS[t], true);
+					final Map<String, Option> loadout = tierCache
+						.computeIfAbsent(role, k -> new HashMap<>())
+						.computeIfAbsent(t, k -> choose(role, rules, false));
+					if (loadout == null)
 					{
-						replacement = option;
-						// Using it means it is no longer sold with the rest.
-						final Plan.Sale queued = saleById.get(option.ownedId);
-						replacementCost = queued != null && queued.isNeeded()
-							? net(items.price(option.ownedId)) : 0;
-						break;
+						continue;
 					}
-				}
-				if (replacement == null)
-				{
-					for (Option option : keep.options)
+					final double loss = loss(role, loadout);
+					if (loss > settings.getMaxSwitchLossPct())
 					{
-						final long p = items.price(option.listId);
-						if (option.rank > keep.pick.rank && items.tradeable(option.listId)
-							&& p > 0 && p < price / 10
-							&& (replacement == null || p < replacementCost))
-						{
-							replacement = option;
-							replacementCost = p;
-						}
+						continue;
 					}
-				}
-
-				final long freed = net(price) - replacementCost;
-				if (freed >= MIN_SWAP_VALUE)
-				{
-					moves.add(new Object[]{keep, replacement, freed, price});
+					final long freed = freed(role, loadout, roles, rules);
+					final long gain = freed - freedSoFar;
+					if (gain < MIN_SWAP_VALUE)
+					{
+						continue;
+					}
+					final double ratio = gain / Math.max(0.25, loss - lossSoFar);
+					if (ratio > bestRatio)
+					{
+						bestRatio = ratio;
+						bestRole = role;
+						bestTier = t;
+						bestLoadout = loadout;
+						bestFreed = freed;
+					}
 				}
 			}
-			moves.sort((a, b) -> Long.compare((long) b[2], (long) a[2]));
-
-			final Set<Integer> used = new HashSet<>();
-			for (Object[] move : moves)
+			if (bestRole == null)
 			{
-				if (raised >= need)
-				{
-					break;
-				}
-				final SwitchKeep keep = (SwitchKeep) move[0];
-				final Option replacement = (Option) move[1];
-				if (!used.add(keep.pick.ownedId)
-					|| (replacement != null && replacement.ownedId >= 0 && !used.add(replacement.ownedId)))
-				{
-					continue;
-				}
-				raised += (long) move[2];
-				kitSold += (long) move[3];
-				sold.add(keep.pick.ownedId);
-				plan.getSwaps().add(new Plan.Swap(keep.pick.ownedId, replacement == null ? -1 : (replacement.ownedId >= 0 ? replacement.ownedId : replacement.listId),
-					label(keep.role), items.name(keep.pick.ownedId),
-					replacement == null ? "nothing in this slot" : replacement.name,
-					replacement != null && replacement.ownedId >= 0, (long) move[2], 0));
-				keepQty.remove(keep.pick.ownedId);
-				if (replacement != null && replacement.ownedId >= 0)
-				{
-					keepQty.put(replacement.ownedId, 1L);
-					plan.getSales().remove(saleById.remove(replacement.ownedId));
-				}
-				keep.pick = replacement;
+				break;
 			}
+			raised += bestFreed - roleFreed.getOrDefault(bestRole, 0L);
+			roleFreed.put(bestRole, bestFreed);
+			tier.put(bestRole, bestTier);
+			bestRole.current = bestLoadout;
 		}
 
-		// ---- 3. The main setup, cheapest damage first --------------------
-		double current = ownedScore;
-		while (raised < need && ownedScore > 0 && mainRole != null)
+		// Record what the switches changed.
+		long kitSold = 0;
+		for (Role role : roles)
+		{
+			if (role.main || !tier.containsKey(role))
+			{
+				continue;
+			}
+			kitSold += describe(plan, role, new Rules(SWITCH_TIERS[tier.get(role)], true), roles);
+			plan.getRoleLoss().put(role.label, loss(role, role.current));
+		}
+
+		// ---- 3. The main setup, cheapest damage first -----------------------
+		double current = main.startDps;
+		final Rules buyAny = new Rules(Long.MAX_VALUE, true);
+		while (raised < need && main.startDps > 0)
 		{
 			String bestSlot = null;
 			Option bestAlt = null;
@@ -568,12 +797,12 @@ public class Planner
 			boolean bestIsVoid = false;
 			boolean bestAltOwned = false;
 
-			for (Map.Entry<String, List<Option>> entry : mainOptions.entrySet())
+			for (Map.Entry<String, List<Option>> entry : main.slots.entrySet())
 			{
 				final String slot = entry.getKey();
-				final Option pick = picks.get(slot);
+				final Option pick = main.current.get(slot);
 				if (pick == null || pick.ownedId < 0 || sold.contains(pick.ownedId)
-					|| (useVoid && VOID_SLOTS.contains(slot)))
+					|| excluded.contains(pick.ownedId) || (useVoid && VOID_SLOTS.contains(slot)))
 				{
 					continue;
 				}
@@ -582,29 +811,29 @@ public class Planner
 				{
 					continue;
 				}
-
 				for (Option alt : entry.getValue())
 				{
-					if (alt == pick || alt.listId == pick.ownedId)
+					if (alt == pick || alt.listId == pick.ownedId
+						|| ("AMMO".equals(slot) && !DpsModel.ammoFits(items, goal.getId(), alt.listId)))
 					{
 						continue;
 					}
 					// Only really owned if it is a different item that is not already sold.
 					final boolean altOwned = alt.ownedId >= 0 && alt.ownedId != pick.ownedId
 						&& !sold.contains(alt.ownedId);
-					long cost;
+					final long cost;
 					if (altOwned)
 					{
-						final Plan.Sale queued = saleById.get(alt.ownedId);
-						cost = queued != null && queued.isNeeded() ? net(items.price(alt.ownedId)) : 0;
+						cost = 0;
 					}
 					else
 					{
-						cost = items.price(alt.listId);
-						if (cost <= 0 || !items.tradeable(alt.listId) || cost > price / 5)
+						final long altPrice = items.price(alt.listId);
+						if (altPrice <= 0 || buyAny.cost(alt) < 0 || altPrice > price / 2)
 						{
 							continue;
 						}
+						cost = altPrice;
 					}
 					final long freed = net(price) - cost;
 					if (freed < MIN_SWAP_VALUE)
@@ -612,17 +841,16 @@ public class Planner
 						continue;
 					}
 
-					picks.put(slot, alt);
-					final double s = score(goal, method, picks, useVoid, levels);
-					picks.put(slot, pick);
+					main.current.put(slot, alt);
+					final double s = dps(main, main.current, useVoid);
+					main.current.put(slot, pick);
 
-					final double total = (ownedScore - s) / ownedScore * 100;
+					final double total = (main.startDps - s) / main.startDps * 100;
 					if (total > settings.getMaxDpsLossPct())
 					{
 						continue;
 					}
-					final double step = Math.max(0.05, (current - s) / ownedScore * 100);
-					final double ratio = freed / step;
+					final double ratio = freed / Math.max(0.05, (current - s) / main.startDps * 100);
 					if (ratio > bestRatio)
 					{
 						bestRatio = ratio;
@@ -637,28 +865,29 @@ public class Planner
 				}
 			}
 
-			// Elite void is free to anyone who already owns it.
+			// Elite void costs nothing to anyone who already owns it.
 			if (voidOwned && !useVoid)
 			{
 				long freed = 0;
 				long gross = 0;
 				for (String slot : VOID_SLOTS)
 				{
-					final Option pick = picks.get(slot);
-					if (pick != null && pick.ownedId >= 0 && items.tradeable(pick.ownedId))
+					final Option pick = main.current.get(slot);
+					if (pick != null && pick.ownedId >= 0 && items.tradeable(pick.ownedId)
+						&& !excluded.contains(pick.ownedId))
 					{
 						freed += net(items.price(pick.ownedId));
 						gross += items.price(pick.ownedId);
 					}
 				}
-				final double s = score(goal, method, picks, true, levels);
-				final double total = (ownedScore - s) / ownedScore * 100;
+				final double s = dps(main, main.current, true);
+				final double total = (main.startDps - s) / main.startDps * 100;
 				if (freed >= MIN_SWAP_VALUE && total <= settings.getMaxDpsLossPct())
 				{
-					final double step = Math.max(0.05, (current - s) / ownedScore * 100);
-					if (freed / step > bestRatio)
+					final double ratio = freed / Math.max(0.05, (current - s) / main.startDps * 100);
+					if (ratio > bestRatio)
 					{
-						bestRatio = freed / step;
+						bestRatio = ratio;
 						bestIsVoid = true;
 						bestFreed = freed;
 						bestGross = gross;
@@ -672,84 +901,198 @@ public class Planner
 				break;
 			}
 
-			final double loss = Math.max(0, (current - bestNew) / ownedScore * 100);
 			if (bestIsVoid)
 			{
-				final List<String> soldNames = new ArrayList<>();
-				final List<Integer> soldIds = new ArrayList<>();
 				for (String slot : VOID_SLOTS)
 				{
-					final Option pick = picks.get(slot);
-					if (pick != null && pick.ownedId >= 0 && items.tradeable(pick.ownedId))
+					final Option pick = main.current.get(slot);
+					if (pick != null && pick.ownedId >= 0 && items.tradeable(pick.ownedId)
+						&& !excluded.contains(pick.ownedId))
 					{
-						soldNames.add(items.name(pick.ownedId));
-						soldIds.add(pick.ownedId);
 						sold.add(pick.ownedId);
-						keepQty.remove(pick.ownedId);
+						plan.getSwaps().add(new Plan.Swap(pick.ownedId, ELITE_VOID_TOP, main.label,
+							items.name(pick.ownedId), "Elite void", true, net(items.price(pick.ownedId))));
 					}
 				}
 				useVoid = true;
 				plan.setUsesVoid(true);
-				plan.getSwaps().add(new Plan.Swap(soldIds.isEmpty() ? ELITE_VOID_TOP : soldIds.get(0), ELITE_VOID_TOP,
-					label(mainRole), String.join(", ", soldNames),
-					"Elite void set", true, bestFreed, loss));
 			}
 			else
 			{
-				final Option pick = picks.get(bestSlot);
-				keepQty.remove(pick.ownedId);
+				final Option pick = main.current.get(bestSlot);
 				sold.add(pick.ownedId);
-				if (bestAltOwned)
-				{
-					keepQty.put(bestAlt.ownedId, 1L);
-					plan.getSales().remove(saleById.remove(bestAlt.ownedId));
-				}
 				plan.getSwaps().add(new Plan.Swap(pick.ownedId, bestAltOwned ? bestAlt.ownedId : bestAlt.listId,
-					label(mainRole), items.name(pick.ownedId),
-					bestAlt.name, bestAltOwned, bestFreed, loss));
+					main.label, items.name(pick.ownedId), bestAlt.name, bestAltOwned, bestFreed));
 				// A bought replacement is a new item, not the one just sold.
-				picks.put(bestSlot, bestAltOwned ? bestAlt
+				main.current.put(bestSlot, bestAltOwned ? bestAlt
 					: new Option(bestAlt.listId, bestAlt.rank, bestAlt.name, -1));
 			}
 			raised += bestFreed;
 			kitSold += bestGross;
 			current = bestNew;
 		}
-
-		// ---- Result -----------------------------------------------------
-		if (mainRole != null)
+		if (current < main.startDps - 1e-9)
 		{
-			if (useVoid)
+			plan.getRoleLoss().put(main.label, (main.startDps - current) / main.startDps * 100);
+		}
+
+		// ---- Result ---------------------------------------------------------
+		for (Role role : roles)
+		{
+			if (role.main && useVoid)
 			{
-				for (int id : new int[]{voidHelm(goal.getStyle()), ELITE_VOID_TOP, ELITE_VOID_ROBE, VOID_GLOVES})
+				for (int id : new int[]{voidHelm(role.data.getStyle()), ELITE_VOID_TOP, ELITE_VOID_ROBE, VOID_GLOVES})
 				{
-					final int held = ownedForm(id, owned);
-					plan.getKeeps().add(new Plan.Keep(held >= 0 ? held : id, label(mainRole), "VOID", items.name(id)));
+					final int held = ownedForm(id);
+					plan.getKeeps().add(new Plan.Keep(held >= 0 ? held : id, role.label, "VOID", items.name(id)));
 				}
 			}
-			for (Map.Entry<String, Option> entry : picks.entrySet())
+			for (Map.Entry<String, Option> entry : role.current.entrySet())
 			{
-				final Option pick = entry.getValue();
-				if (pick != null && pick.ownedId >= 0 && !(useVoid && VOID_SLOTS.contains(entry.getKey())))
+				final Option option = entry.getValue();
+				if (option != null && option.ownedId >= 0 && !sold.contains(option.ownedId)
+					&& !(role.main && useVoid && VOID_SLOTS.contains(entry.getKey())))
 				{
-					plan.getKeeps().add(new Plan.Keep(pick.ownedId, label(mainRole), entry.getKey(), pick.name));
+					plan.getKeeps().add(new Plan.Keep(option.ownedId, role.label, entry.getKey(), option.name));
 				}
 			}
 		}
-		for (SwitchKeep keep : switchKeeps)
-		{
-			if (keep.pick != null && keep.pick.ownedId >= 0)
-			{
-				plan.getKeeps().add(new Plan.Keep(keep.pick.ownedId, label(keep.role), keep.slot, keep.pick.name));
-			}
-		}
 
+		final double bestDps = dps(main, bestPossible(main), false);
 		plan.setRaised(raised);
 		plan.setShortfall(Math.max(0, need - raised));
 		plan.setKitSold(kitSold);
-		plan.setDpsLossPct(ownedScore > 0 ? Math.max(0, (ownedScore - current) / ownedScore * 100) : 0);
-		plan.setDpsVersusBest(bestScore > 0 ? Math.min(1, current / bestScore) : 0);
+		plan.setDpsLossPct(main.startDps > 0 ? Math.max(0, (main.startDps - current) / main.startDps * 100) : 0);
+		plan.setDpsVersusBest(bestDps > 0 ? Math.min(1, current / bestDps) : 0);
 		plan.setEstGpPerHour((long) (method.getGpPerHour() * plan.getDpsVersusBest()));
 		return plan;
+	}
+
+	/** Damage a switch loses with this loadout, in percent of what it started with. */
+	private double loss(Role role, Map<String, Option> loadout)
+	{
+		return role.startDps <= 0 ? 0
+			: Math.max(0, (role.startDps - dps(role, loadout, false)) / role.startDps * 100);
+	}
+
+	/** Owned pieces of the starting switch that a new loadout no longer uses and can be sold. */
+	private List<Option> soldBy(Role role, Map<String, Option> loadout, List<Role> roles, Rules rules)
+	{
+		final Set<Integer> stillUsed = new HashSet<>(mainKept);
+		for (Option option : loadout.values())
+		{
+			if (option != null && option.ownedId >= 0 && rules.cost(option) == 0)
+			{
+				stillUsed.add(option.ownedId);
+			}
+		}
+		// A piece another switch still wears is not this switch's to sell.
+		for (Role other : roles)
+		{
+			if (other != role && other.current != null)
+			{
+				for (Option option : other.current.values())
+				{
+					if (option != null && option.ownedId >= 0)
+					{
+						stillUsed.add(option.ownedId);
+					}
+				}
+			}
+		}
+
+		final List<Option> out = new ArrayList<>();
+		final Set<Integer> seen = new HashSet<>();
+		for (Option option : role.start.values())
+		{
+			if (option == null || option.ownedId < 0 || stillUsed.contains(option.ownedId)
+				|| excluded.contains(option.ownedId) || !items.tradeable(option.ownedId)
+				|| items.price(option.ownedId) <= rules.tier || !seen.add(option.ownedId))
+			{
+				continue;
+			}
+			out.add(option);
+		}
+		return out;
+	}
+
+	private long freed(Role role, Map<String, Option> loadout, List<Role> roles, Rules rules)
+	{
+		long freed = 0;
+		for (Option option : soldBy(role, loadout, roles, rules))
+		{
+			freed += net(items.price(option.ownedId));
+		}
+		return freed - cost(loadout, rules);
+	}
+
+	/** Turns a switch's tier change into plan lines; returns the gross value sold. */
+	private long describe(Plan plan, Role role, Rules rules, List<Role> roles)
+	{
+		long gross = 0;
+		final Set<String> replacedSlots = new HashSet<>();
+		for (Option gone : soldBy(role, role.current, roles, rules))
+		{
+			// Name the replacement worn in the same slot, if any.
+			String slot = null;
+			for (Map.Entry<String, Option> entry : role.start.entrySet())
+			{
+				if (entry.getValue() == gone)
+				{
+					slot = entry.getKey();
+				}
+			}
+			final Option use = slot == null ? null : role.current.get(slot);
+			final boolean useOwned = use != null && rules.cost(use) == 0;
+			long cost = 0;
+			if (use != null && !useOwned)
+			{
+				cost = Math.max(0, rules.cost(use)) * ("AMMO".equals(slot) ? ammoReserve(use.listId) : 1);
+				replacedSlots.add(slot);
+			}
+			sold.add(gone.ownedId);
+			gross += items.price(gone.ownedId);
+			plan.getSwaps().add(new Plan.Swap(gone.ownedId,
+				use == null ? -1 : (useOwned ? use.ownedId : use.listId), role.label,
+				items.name(gone.ownedId), use == null ? "nothing" : use.name, useOwned,
+				net(items.price(gone.ownedId)) - cost));
+		}
+		// Buys that do not replace a sold piece.
+		for (Map.Entry<String, Option> entry : role.current.entrySet())
+		{
+			final Option use = entry.getValue();
+			if (use == null || replacedSlots.contains(entry.getKey()) || rules.cost(use) <= 0)
+			{
+				continue;
+			}
+			final long qty = "AMMO".equals(entry.getKey()) && isAmmunition(use) ? ammoReserve(use.listId) : 1;
+			plan.getBuys().add(new Plan.Buy(use.listId, role.label, entry.getKey(), use.name, qty,
+				rules.cost(use) * qty));
+		}
+		return gross;
+	}
+
+	/** The top of every list, regardless of ownership: the damage ceiling. */
+	private Map<String, Option> bestPossible(Role role)
+	{
+		final Map<String, Option> loadout = new LinkedHashMap<>();
+		final boolean twoHanded = twoHanded(role, loadout);
+		for (Map.Entry<String, List<Option>> entry : role.slots.entrySet())
+		{
+			if ("SHIELD".equals(entry.getKey()) && twoHanded)
+			{
+				continue;
+			}
+			for (Option option : entry.getValue())
+			{
+				if (items.stats(option.listId) != null
+					&& (!"AMMO".equals(entry.getKey()) || DpsModel.ammoFits(items, goal.getId(), option.listId)))
+				{
+					loadout.put(entry.getKey(), option);
+					break;
+				}
+			}
+		}
+		return loadout;
 	}
 }

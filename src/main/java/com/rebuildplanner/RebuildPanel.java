@@ -8,11 +8,17 @@ package com.rebuildplanner;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
+import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.GridLayout;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,6 +32,7 @@ import javax.swing.JEditorPane;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
+import javax.swing.JTextField;
 import javax.swing.SwingConstants;
 import javax.swing.border.EmptyBorder;
 import javax.swing.text.View;
@@ -38,6 +45,23 @@ import net.runelite.client.util.QuantityFormatter;
 /** Side panel: pick a megarare and a way to earn it back, then read the plan. */
 public class RebuildPanel extends PluginPanel
 {
+	/** What the panel asks the plugin to do. */
+	public interface Actions
+	{
+		/** The goal choice changed; plan again. */
+		void changed();
+
+		void exclude(int itemId);
+
+		void restore(int itemId);
+
+		void setQuantity(int itemId, long quantity);
+
+		void clearQuantity(int itemId);
+
+		void resetAll();
+	}
+
 	private static final String AUTO = "Best method for me";
 
 	/** Usable width inside the sidebar's padding. */
@@ -52,6 +76,9 @@ public class RebuildPanel extends PluginPanel
 	private static final Color MUTED = new Color(0x9A, 0x9A, 0x9A);
 
 	private final ItemManager itemManager;
+	private final Actions actions;
+	/** True when the player has excluded items or changed amounts. */
+	private boolean hasOverrides;
 	private final JComboBox<RebuildData.Goal> goalBox = new JComboBox<>();
 	private final JComboBox<String> methodBox = new JComboBox<>();
 	private final JLabel goalIcon = new JLabel();
@@ -63,9 +90,10 @@ public class RebuildPanel extends PluginPanel
 	/** True while the method list is being refilled, to ignore its events. */
 	private boolean filling;
 
-	public RebuildPanel(List<RebuildData.Goal> goals, ItemManager itemManager, Runnable onChange)
+	public RebuildPanel(List<RebuildData.Goal> goals, ItemManager itemManager, Actions actions)
 	{
 		this.itemManager = itemManager;
+		this.actions = actions;
 		setLayout(new BorderLayout(0, 8));
 		setBorder(new EmptyBorder(8, 8, 8, 8));
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -112,7 +140,7 @@ public class RebuildPanel extends PluginPanel
 		{
 			fillMethods();
 			updateHero();
-			onChange.run();
+			actions.changed();
 		});
 		methodBox.addActionListener(e ->
 		{
@@ -380,8 +408,9 @@ public class RebuildPanel extends PluginPanel
 		addCard(card);
 	}
 
-	public void showPlans(RebuildData.Goal goal, List<Plan> plans, boolean bankSeen)
+	public void showPlans(RebuildData.Goal goal, List<Plan> plans, boolean bankSeen, boolean hasOverrides)
 	{
+		this.hasOverrides = hasOverrides;
 		if (goal != selectedGoal())
 		{
 			return;
@@ -400,9 +429,14 @@ public class RebuildPanel extends PluginPanel
 	private void render()
 	{
 		content.removeAll();
+
+		// Until the bank has been read the plan would be built on the inventory
+		// alone and mislead, so show nothing but how to fix that.
 		if (!bankSeen)
 		{
 			addBankHelp();
+			refresh();
+			return;
 		}
 
 		final Plan plan = selectedPlan();
@@ -420,10 +454,10 @@ public class RebuildPanel extends PluginPanel
 		addSales(plan);
 		addSwaps(plan);
 		addBuys(plan);
+		addExcluded(plan);
 		addKeeps(plan);
 		refresh();
 	}
-
 	// ---- Sections --------------------------------------------------------
 
 	private void addSummary(Plan plan)
@@ -469,8 +503,11 @@ public class RebuildPanel extends PluginPanel
 		}
 		else
 		{
-			verdict = "Short by " + gp(plan.getShortfall()) + " after everything below. Selling more "
-				+ "would cost too much damage.";
+			verdict = hasOverrides
+				? "Can't be done with what you chose to keep: short by " + gp(plan.getShortfall())
+					+ ". Allow some items to be sold again, or sell more of something."
+				: "Short by " + gp(plan.getShortfall()) + " after everything below. Selling more "
+					+ "would cost too much damage.";
 		}
 		card.add(text("<b>" + esc(verdict) + "</b>", INNER - 20, accent));
 		addCard(card);
@@ -510,6 +547,74 @@ public class RebuildPanel extends PluginPanel
 		addCard(card);
 	}
 
+	/** A small clickable glyph, styled to sit at the end of a row. */
+	private static JLabel button(String glyph, String tooltip, Color colour, Runnable action)
+	{
+		final JLabel label = new JLabel(glyph, SwingConstants.CENTER);
+		label.setFont(FontManager.getRunescapeBoldFont());
+		label.setForeground(colour);
+		label.setToolTipText(tooltip);
+		label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+		label.setPreferredSize(new Dimension(18, 18));
+		label.addMouseListener(new MouseAdapter()
+		{
+			@Override
+			public void mouseClicked(MouseEvent e)
+			{
+				action.run();
+			}
+
+			@Override
+			public void mouseEntered(MouseEvent e)
+			{
+				label.setForeground(Color.WHITE);
+			}
+
+			@Override
+			public void mouseExited(MouseEvent e)
+			{
+				label.setForeground(colour);
+			}
+		});
+		return label;
+	}
+
+	/** An editable amount; commits on Enter or when focus leaves. */
+	private JTextField quantityField(Plan.Sale sale)
+	{
+		final JTextField field = new JTextField(gp(sale.getQuantity()), 5);
+		field.setFont(FontManager.getRunescapeSmallFont());
+		field.setToolTipText("How many to sell, e.g. 5000, 5k or 1.5m. Press Enter to update the plan.");
+		field.setMaximumSize(new Dimension(70, 20));
+		final Runnable commit = () ->
+		{
+			final String text = field.getText().trim();
+			if (text.isEmpty() || text.equals(gp(sale.getQuantity())))
+			{
+				return;
+			}
+			try
+			{
+				final long qty = Math.max(0, Math.min(sale.getHeld(), QuantityFormatter.parseQuantity(text)));
+				actions.setQuantity(sale.getItemId(), qty);
+			}
+			catch (ParseException e)
+			{
+				field.setText(gp(sale.getQuantity()));
+			}
+		};
+		field.addActionListener(e -> commit.run());
+		field.addFocusListener(new FocusAdapter()
+		{
+			@Override
+			public void focusLost(FocusEvent e)
+			{
+				commit.run();
+			}
+		});
+		return field;
+	}
+
 	private void addSales(Plan plan)
 	{
 		final List<Plan.Sale> needed = new ArrayList<>();
@@ -533,20 +638,40 @@ public class RebuildPanel extends PluginPanel
 		final JPanel card = card("Sell from your bank", GOOD);
 		for (Plan.Sale sale : needed)
 		{
-			String detail = "<span style='color:" + hex(GOOD) + "'>+" + gp(sale.getProceeds()) + "</span>";
-			if (sale.getQuantity() > 1 || sale.getKept() > 0)
+			final JPanel row = left(new JPanel(new BorderLayout(6, 0)));
+			row.setBackground(CARD);
+			row.setBorder(new EmptyBorder(3, 0, 3, 0));
+			row.add(icon(sale.getItemId(), sale.getQuantity()), BorderLayout.WEST);
+
+			final JPanel middle = column();
+			middle.setBackground(CARD);
+			middle.add(text("<span style='color:white'>" + esc(sale.getName()) + "</span>", 0, MUTED));
+
+			if (sale.getHeld() > 1)
 			{
-				detail = "Sell " + gp(sale.getQuantity()) + " &middot; " + detail;
+				final JPanel amount = left(new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 1)));
+				amount.setBackground(CARD);
+				amount.add(caption("Sell"));
+				amount.add(quantityField(sale));
+				amount.add(caption("of " + gp(sale.getHeld())));
+				if (sale.isCustom())
+				{
+					amount.add(button("\u21BA", "Go back to the suggested amount", MUTED,
+						() -> actions.clearQuantity(sale.getItemId())));
+				}
+				middle.add(amount);
 			}
-			if (sale.getKept() > 0)
-			{
-				detail += "<br>Keep " + gp(sale.getKept()) + " for the grind";
-			}
-			card.add(row(sale.getItemId(), sale.getQuantity(), sale.getName(), detail, null));
+			middle.add(text("<span style='color:" + hex(GOOD) + "'>+" + gp(sale.getProceeds()) + "</span>"
+				+ (sale.getKept() > 0 && sale.getHeld() > 1 ? " &middot; keeps " + gp(sale.getKept()) : ""),
+				0, MUTED));
+			row.add(middle, BorderLayout.CENTER);
+			row.add(button("\u2715", "Don't sell this - the plan will try to make it up elsewhere", BAD,
+				() -> actions.exclude(sale.getItemId())), BorderLayout.EAST);
+			card.add(row);
 		}
 		card.add(Box.createVerticalStrut(4));
-		card.add(text("Amounts are after the 2% Grand Exchange tax."
-			+ (optional > 0 ? " Another " + gp(optional) + " of spare items is not needed and can stay." : ""),
+		card.add(text("After the 2% Grand Exchange tax. Click \u2715 to keep an item, or change an amount and "
+			+ "press Enter." + (optional > 0 ? " Another " + gp(optional) + " of spare items is not needed." : ""),
 			INNER - 20, MUTED));
 		addCard(card);
 	}
@@ -558,41 +683,76 @@ public class RebuildPanel extends PluginPanel
 			return;
 		}
 		final JPanel card = card("Sell and swap down", WARN);
+		String lastRole = null;
 		for (Plan.Swap swap : plan.getSwaps())
 		{
+			if (!swap.getRole().equals(lastRole))
+			{
+				lastRole = swap.getRole();
+				final Double loss = plan.getRoleLoss().get(lastRole);
+				card.add(Box.createVerticalStrut(2));
+				card.add(text("<b>" + esc(lastRole) + "</b>" + (loss != null && loss >= 0.05
+					? " &middot; <span style='color:" + hex(WARN) + "'>" + String.format("-%.1f%% damage", loss)
+						+ "</span>" : " &middot; no damage lost"), 0, ColorScheme.LIGHT_GRAY_COLOR));
+			}
+
 			final JPanel row = left(new JPanel(new BorderLayout(6, 0)));
 			row.setBackground(CARD);
 			row.setBorder(new EmptyBorder(2, 0, 4, 0));
 
+			final JPanel top = new JPanel(new BorderLayout());
+			top.setBackground(CARD);
 			final JPanel pictures = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
 			pictures.setBackground(CARD);
 			pictures.add(icon(swap.getSellId(), 1));
-			final JLabel arrow = new JLabel("→");
+			final JLabel arrow = new JLabel("\u2192");
 			arrow.setForeground(MUTED);
 			pictures.add(arrow);
 			pictures.add(icon(swap.getUseId(), 1));
-			row.add(pictures, BorderLayout.NORTH);
+			top.add(pictures, BorderLayout.WEST);
+			top.add(button("\u2715", "Keep " + swap.getSell() + " - the plan will look elsewhere", BAD,
+				() -> actions.exclude(swap.getSellId())), BorderLayout.EAST);
+			row.add(top, BorderLayout.NORTH);
 
-			String detail = "<span style='color:white'>Sell " + esc(swap.getSell()) + "</span><br>"
-				+ "Use " + esc(swap.getUse()) + (swap.isUseOwned() ? "" : " (buy it)") + "<br>"
-				+ "<span style='color:" + hex(GOOD) + "'>+" + gp(swap.getFreed()) + "</span>";
-			if (swap.getLossPct() >= 0.05)
-			{
-				detail += " &middot; <span style='color:" + hex(WARN) + "'>"
-					+ String.format("-%.1f%% damage", swap.getLossPct()) + "</span>";
-			}
-			detail += " &middot; " + esc(swap.getRole());
-			row.add(text(detail, INNER - 20, MUTED), BorderLayout.CENTER);
+			row.add(text("<span style='color:white'>Sell " + esc(swap.getSell()) + "</span><br>"
+				+ "Use " + esc(swap.getUse()) + (swap.isUseOwned() || swap.getUseId() < 0 ? "" : " (buy it)") + "<br>"
+				+ "<span style='color:" + hex(GOOD) + "'>+" + gp(swap.getFreed()) + "</span>", 0, MUTED),
+				BorderLayout.CENTER);
 			card.add(row);
-		}
-		if (plan.getDpsLossPct() >= 0.05)
-		{
-			card.add(text(String.format("Total damage given up: %.1f%%", plan.getDpsLossPct()),
-				INNER - 20, WARN));
 		}
 		addCard(card);
 	}
 
+	/** What the player has told the plan to keep, with a way back. */
+	private void addExcluded(Plan plan)
+	{
+		if (plan.getExcluded().isEmpty() && !hasOverrides)
+		{
+			return;
+		}
+		final JPanel card = card("You chose to keep", ColorScheme.LIGHT_GRAY_COLOR);
+		for (Plan.Excluded item : plan.getExcluded())
+		{
+			final JPanel row = left(new JPanel(new BorderLayout(6, 0)));
+			row.setBackground(CARD);
+			row.add(icon(item.getItemId(), 1), BorderLayout.WEST);
+			row.add(text(esc(item.getName()), 0, Color.WHITE), BorderLayout.CENTER);
+			row.add(button("\u21BA", "Allow the plan to sell this again", MUTED,
+				() -> actions.restore(item.getItemId())), BorderLayout.EAST);
+			card.add(row);
+		}
+		if (hasOverrides)
+		{
+			card.add(Box.createVerticalStrut(4));
+			final JLabel reset = left(button("Reset all my changes", "Undo every \u2715 and amount change",
+				ColorScheme.BRAND_ORANGE, actions::resetAll));
+			reset.setFont(FontManager.getRunescapeSmallFont());
+			reset.setHorizontalAlignment(SwingConstants.LEFT);
+			reset.setPreferredSize(null);
+			card.add(reset);
+		}
+		addCard(card);
+	}
 	private void addBuys(Plan plan)
 	{
 		if (plan.getBuys().isEmpty())

@@ -17,13 +17,24 @@ public interface ItemInfo
 	@Value
 	class Stats
 	{
+		int astab;
 		int aslash;
+		int acrush;
 		int amagic;
 		int arange;
 		int str;
 		int rstr;
 		double mdmg;
+		/** Attack speed in ticks; only meaningful on a weapon. */
+		int aspeed;
 		boolean twoHanded;
+
+		/** Shorthand for armour, which has no speed and is never two-handed. */
+		public static Stats armour(int astab, int aslash, int acrush, int amagic, int arange,
+								   int str, int rstr, double mdmg)
+		{
+			return new Stats(astab, aslash, acrush, amagic, arange, str, rstr, mdmg, 0, false);
+		}
 	}
 
 	String name(int itemId);

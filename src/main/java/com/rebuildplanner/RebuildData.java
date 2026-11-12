@@ -77,6 +77,8 @@ public final class RebuildData
 		private String style;
 		/** True for the setup the megarare is used in; false for a switch. */
 		private boolean main;
+		/** The boss a switch is used on; null means the method's own target. */
+		private Target target;
 		private List<Slot> slots;
 	}
 

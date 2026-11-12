@@ -48,4 +48,16 @@ public interface RebuildPlannerConfig extends Config
 	{
 		return 15;
 	}
+
+	@Range(min = 0, max = 80)
+	@ConfigItem(
+		keyName = "maxSwitchLoss",
+		name = "Most switch damage to give up (%)",
+		description = "Raid switches only have to exist, so they can be sold down further than the main setup. This caps how far",
+		position = 4
+	)
+	default int maxSwitchLoss()
+	{
+		return 40;
+	}
 }

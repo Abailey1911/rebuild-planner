@@ -64,6 +64,13 @@ public class RebuildPlannerPlugin extends Plugin
 	@Inject
 	private Gson gson;
 
+	@Inject
+	private ConfigManager configManager;
+
+	/** The player's own ✕s and amounts; saved so they survive a restart. */
+	private Overrides overrides = new Overrides();
+	private static final String OVERRIDES_KEY = "overrides";
+
 	private List<RebuildData.Goal> goals;
 	private Planner planner;
 	private RebuildPanel panel;
@@ -79,7 +86,8 @@ public class RebuildPlannerPlugin extends Plugin
 		final Map<String, List<Integer>> variants = RebuildData.loadVariants(gson);
 		planner = new Planner(new ClientItemInfo(), variants);
 
-		panel = new RebuildPanel(goals, itemManager, this::requestPlan);
+		overrides = loadOverrides();
+		panel = new RebuildPanel(goals, itemManager, new PanelActions());
 
 		navButton = NavigationButton.builder()
 			.tooltip("Gear Upgrade: Rebuild Planner")
@@ -196,14 +204,14 @@ public class RebuildPlannerPlugin extends Plugin
 			client.getRealSkillLevel(Skill.ATTACK), client.getRealSkillLevel(Skill.STRENGTH),
 			client.getRealSkillLevel(Skill.RANGED), client.getRealSkillLevel(Skill.MAGIC));
 		final Planner.Settings settings = new Planner.Settings(
-			config.minStackValue(), config.supplyReserve(), config.maxDpsLoss());
+			config.minStackValue(), config.supplyReserve(), config.maxDpsLoss(), config.maxSwitchLoss());
 
 		final List<Plan> plans = new ArrayList<>();
 		for (RebuildData.Method method : goal.getMethods())
 		{
 			try
 			{
-				plans.add(planner.plan(goal, method, owned, coins, levels, settings));
+				plans.add(planner.plan(goal, method, owned, coins, levels, settings, overrides));
 			}
 			catch (RuntimeException e)
 			{
@@ -212,7 +220,87 @@ public class RebuildPlannerPlugin extends Plugin
 		}
 
 		final boolean bankSeen = holdings.isBankSeen();
-		SwingUtilities.invokeLater(() -> target.showPlans(goal, plans, bankSeen));
+		final boolean changed = !overrides.isEmpty();
+		SwingUtilities.invokeLater(() -> target.showPlans(goal, plans, bankSeen, changed));
+	}
+
+	private Overrides loadOverrides()
+	{
+		final String json = configManager.getConfiguration(RebuildPlannerConfig.GROUP, OVERRIDES_KEY);
+		if (json == null || json.isEmpty())
+		{
+			return new Overrides();
+		}
+		try
+		{
+			final Overrides loaded = gson.fromJson(json, Overrides.class);
+			return loaded == null ? new Overrides() : loaded;
+		}
+		catch (RuntimeException e)
+		{
+			log.debug("Discarding unreadable rebuild overrides", e);
+			return new Overrides();
+		}
+	}
+
+	/** Saves and replans. Runs on the Swing thread; planning moves to the client thread. */
+	private void overridesChanged()
+	{
+		if (overrides.isEmpty())
+		{
+			configManager.unsetConfiguration(RebuildPlannerConfig.GROUP, OVERRIDES_KEY);
+		}
+		else
+		{
+			configManager.setConfiguration(RebuildPlannerConfig.GROUP, OVERRIDES_KEY, gson.toJson(overrides));
+		}
+		requestPlan();
+	}
+
+	/** The panel's buttons and fields. */
+	private final class PanelActions implements RebuildPanel.Actions
+	{
+		@Override
+		public void changed()
+		{
+			requestPlan();
+		}
+
+		@Override
+		public void exclude(int itemId)
+		{
+			overrides.getExcluded().add(itemId);
+			overrides.getSellQuantity().remove(itemId);
+			overridesChanged();
+		}
+
+		@Override
+		public void restore(int itemId)
+		{
+			overrides.getExcluded().remove(itemId);
+			overridesChanged();
+		}
+
+		@Override
+		public void setQuantity(int itemId, long quantity)
+		{
+			overrides.getSellQuantity().put(itemId, quantity);
+			overridesChanged();
+		}
+
+		@Override
+		public void clearQuantity(int itemId)
+		{
+			overrides.getSellQuantity().remove(itemId);
+			overridesChanged();
+		}
+
+		@Override
+		public void resetAll()
+		{
+			overrides = new Overrides();
+			overridesChanged();
+		}
 	}
 
 	@Provides
@@ -252,8 +340,8 @@ public class RebuildPlannerPlugin extends Plugin
 			{
 				return null;
 			}
-			return new Stats(e.getAslash(), e.getAmagic(), e.getArange(), e.getStr(), e.getRstr(),
-				e.getMdmg(), e.isTwoHanded());
+			return new Stats(e.getAstab(), e.getAslash(), e.getAcrush(), e.getAmagic(), e.getArange(),
+				e.getStr(), e.getRstr(), e.getMdmg(), e.getAspeed(), e.isTwoHanded());
 		}
 	}
 }

@@ -6,7 +6,9 @@
 package com.rebuildplanner;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import lombok.Data;
 import lombok.Value;
 
@@ -32,6 +34,7 @@ public class Plan
 		String role;
 		String slot;
 		String name;
+		long quantity;
 		long cost;
 	}
 
@@ -41,20 +44,25 @@ public class Plan
 	{
 		int itemId;
 		String name;
+		/** How many to sell. */
 		long quantity;
-		/** How many are held back as a working reserve. */
+		/** How many are held back. */
 		long kept;
+		/** Total held. */
+		long held;
 		/** After Grand Exchange tax. */
 		long proceeds;
 		/** False once the goal is already covered by the lines above. */
 		boolean needed;
+		/** True when the player set the quantity themselves. */
+		boolean custom;
 	}
 
 	/** Selling a kit piece and making do with something cheaper. */
 	@Value
 	public static class Swap
 	{
-		/** First item sold, for its picture. */
+		/** The item sold, for its picture and for excluding it. */
 		int sellId;
 		/** Replacement's picture, or -1 when the slot is left empty. */
 		int useId;
@@ -65,8 +73,14 @@ public class Plan
 		boolean useOwned;
 		/** Net gp gained, after tax and after paying for the replacement. */
 		long freed;
-		/** Damage lost on the main setup, in percent. Zero for switches. */
-		double lossPct;
+	}
+
+	/** Something the player has said not to sell. */
+	@Value
+	public static class Excluded
+	{
+		int itemId;
+		String name;
 	}
 
 	private RebuildData.Goal goal;
@@ -85,11 +99,14 @@ public class Plan
 	private final List<Buy> buys = new ArrayList<>();
 	private final List<Sale> sales = new ArrayList<>();
 	private final List<Swap> swaps = new ArrayList<>();
+	private final List<Excluded> excluded = new ArrayList<>();
+	/** Damage given up per setup, in percent, for setups that were sold down. */
+	private final Map<String, Double> roleLoss = new LinkedHashMap<>();
 
 	private boolean usesVoid;
 	/** Damage of the rebuild kit against the best possible kit, 0 to 1. */
 	private double dpsVersusBest;
-	/** Damage given up by the swaps, in percent of the kit the player owns. */
+	/** Damage given up on the main setup, in percent. */
 	private double dpsLossPct;
 	private long estGpPerHour;
 	/** Gross value of the kit pieces sold in swaps. */

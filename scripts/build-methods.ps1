@@ -10,13 +10,16 @@ function Table($owner, $style) {
 	if (-not $t) { throw "No table for $owner / $style" }
 	$t
 }
-function Role($owner, $style, $main, [string[]]$onlySlots) {
+function Role($owner, $style, $main, [string[]]$onlySlots, [string]$targetName) {
 	$t = Table $owner $style
 	$slots = foreach ($s in $t.slots) {
 		if ($onlySlots -and ($onlySlots -notcontains $s.slot)) { continue }
 		[ordered]@{ slot = $s.slot; items = @($s.items); ids = @($s.ids) }
 	}
-	[ordered]@{ style = $style; main = $main; slots = @($slots) }
+	$r = [ordered]@{ style = $style; main = $main; slots = @($slots) }
+	# A switch is judged against the boss it is actually used on in that raid.
+	if ($targetName) { $r.target = Target $targetName }
+	$r
 }
 function Target($name) {
 	$m = $monsters | Where-Object name -eq $name | Select-Object -First 1
@@ -24,7 +27,7 @@ function Target($name) {
 	[ordered]@{ name = $m.name; defenceLevel = $m.defenceLevel; magicLevel = $m.magicLevel; dstab = $m.dstab; dslash = $m.dslash; dcrush = $m.dcrush; dmagic = $m.dmagic; drange = $m.drange }
 }
 # A switch is a handful of pieces, not a second full setup.
-$switchSlots = 'WEAPON', 'HEAD', 'BODY', 'LEGS', 'AMULET', 'CAPE', 'AMMO'
+$switchSlots = 'WEAPON', 'SHIELD', 'HEAD', 'BODY', 'LEGS', 'AMULET', 'CAPE', 'AMMO'
 
 $goals = @(
 	[ordered]@{
@@ -51,13 +54,13 @@ $goals = @(
 				name = 'Tombs of Amascut (solo 450)'; gpPerHour = 5529000
 				note = 'Wiki rate for solo 450 raid level. The shadow does most of the raid, but you still need ranged and melee switches to finish it in good time.'
 				target = Target 'Akkha'; gearMultiplier = 4
-				roles = @((Role 'Tombs of Amascut' 'MAGIC' $true $null), (Role 'Tombs of Amascut' 'RANGED' $false $switchSlots), (Role 'Tombs of Amascut' 'MELEE' $false $switchSlots))
+				roles = @((Role 'Tombs of Amascut' 'MAGIC' $true $null), (Role 'Tombs of Amascut' 'RANGED' $false $switchSlots 'Zebak'), (Role 'Tombs of Amascut' 'MELEE' $false $switchSlots 'Wardens (P3, enraged)'))
 			},
 			[ordered]@{
 				name = 'Tombs of Amascut (expert, 300+)'; gpPerHour = 3223000
 				note = 'Wiki rate for expert raids. Use this if 450s are out of reach on the rebuild kit.'
 				target = Target 'Akkha'; gearMultiplier = 4
-				roles = @((Role 'Tombs of Amascut' 'MAGIC' $true $null), (Role 'Tombs of Amascut' 'RANGED' $false $switchSlots), (Role 'Tombs of Amascut' 'MELEE' $false $switchSlots))
+				roles = @((Role 'Tombs of Amascut' 'MAGIC' $true $null), (Role 'Tombs of Amascut' 'RANGED' $false $switchSlots 'Zebak'), (Role 'Tombs of Amascut' 'MELEE' $false $switchSlots 'Wardens (P3, enraged)'))
 			},
 			[ordered]@{
 				name = 'The Whisperer'; gpPerHour = 4903000
@@ -74,7 +77,7 @@ $goals = @(
 				name = 'Theatre of Blood'; gpPerHour = 8044000
 				note = 'Wiki rate for a competent team. Needs ranged and magic switches as well as the melee setup.'
 				target = Target 'Verzik Vitur (P3)'; gearMultiplier = 1
-				roles = @((Role 'Theatre of Blood' 'MELEE' $true $null), (Role 'Theatre of Blood' 'RANGED' $false $switchSlots), (Role 'Theatre of Blood' 'MAGIC' $false $switchSlots))
+				roles = @((Role 'Theatre of Blood' 'MELEE' $true $null), (Role 'Theatre of Blood' 'RANGED' $false $switchSlots 'Verzik Vitur (P1)'), (Role 'Theatre of Blood' 'MAGIC' $false $switchSlots 'Verzik Vitur (P2)'))
 			},
 			[ordered]@{
 				name = 'Duke Sucellus'; gpPerHour = 6751000

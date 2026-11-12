@@ -11,29 +11,33 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import com.google.gson.Gson;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.Before;
 import org.junit.Test;
 
 public class PlannerTest
 {
 	private static final DpsModel.Levels MAXED = new DpsModel.Levels(99, 99, 99, 99);
-	private static final Planner.Settings SETTINGS = new Planner.Settings(1_000_000, 3_000_000, 15);
+	private static final Planner.Settings SETTINGS = new Planner.Settings(1_000_000, 3_000_000, 15, 40);
 
-	/** Unrelated tradeables used as bank filler. */
+	/** Unrelated tradeable used as bank filler. */
 	private static final int SPARE = 900_001;
 	private static final int PRAYER_POTION = 2434;
 
 	private List<RebuildData.Goal> goals;
 	private FakeItems items;
 	private Planner planner;
+	private Map<Integer, Long> owned;
 
 	private static final class FakeItems implements ItemInfo
 	{
 		final Map<Integer, String> names = new HashMap<>();
 		final Map<Integer, Long> prices = new HashMap<>();
 		final Map<Integer, Stats> stats = new HashMap<>();
+		final Set<Integer> untradeable = new HashSet<>();
 
 		void add(int id, String name, long price, Stats s)
 		{
@@ -60,7 +64,7 @@ public class PlannerTest
 		@Override
 		public boolean tradeable(int itemId)
 		{
-			return prices.getOrDefault(itemId, 0L) > 0;
+			return !untradeable.contains(itemId) && prices.getOrDefault(itemId, 0L) > 0;
 		}
 
 		@Override
@@ -77,10 +81,13 @@ public class PlannerTest
 		goals = RebuildData.loadGoals(gson);
 		items = new FakeItems();
 		planner = new Planner(items, RebuildData.loadVariants(gson));
+		owned = new HashMap<>();
 
 		items.add(SPARE, "Spare trophy", 2_000_000_000L, null);
 		items.add(PRAYER_POTION, "Prayer potion(4)", 9_000, null);
 	}
+
+	// ---- Helpers -------------------------------------------------------------
 
 	private RebuildData.Goal goal(String name)
 	{
@@ -107,7 +114,7 @@ public class PlannerTest
 	}
 
 	/** Id of a named item in one of a method's gear lists. */
-	private int id(RebuildData.Method method, String style, String item)
+	private static int id(RebuildData.Method method, String style, String item)
 	{
 		for (RebuildData.Role role : method.getRoles())
 		{
@@ -127,15 +134,64 @@ public class PlannerTest
 		throw new AssertionError("No " + item + " in " + style);
 	}
 
+	/** Adds an item from a method's lists, and optionally owns it. */
+	private int item(RebuildData.Method method, String style, String name, long price, ItemInfo.Stats stats,
+					 long held)
+	{
+		final int id = id(method, style, name);
+		items.add(id, name, price, stats);
+		if (held > 0)
+		{
+			owned.put(id, held);
+		}
+		return id;
+	}
+
+	private static ItemInfo.Stats weapon(int stab, int slash, int crush, int magic, int range, int str, int rstr,
+										 int speed, boolean twoHanded)
+	{
+		return new ItemInfo.Stats(stab, slash, crush, magic, range, str, rstr, 0, speed, twoHanded);
+	}
+
 	private static ItemInfo.Stats magic(int attack, double damage)
 	{
-		return new ItemInfo.Stats(0, attack, 0, 0, 0, damage, false);
+		return ItemInfo.Stats.armour(0, 0, 0, attack, 0, 0, 0, damage);
 	}
 
 	private static ItemInfo.Stats ranged(int attack, int strength)
 	{
-		return new ItemInfo.Stats(0, 0, attack, 0, strength, 0, false);
+		return ItemInfo.Stats.armour(0, 0, 0, 0, attack, 0, strength, 0);
 	}
+
+	private static ItemInfo.Stats melee(int stab, int slash, int str)
+	{
+		return ItemInfo.Stats.armour(stab, slash, 0, 0, 0, str, 0, 0);
+	}
+
+	private RebuildData.Method toa(long shadowPrice)
+	{
+		final RebuildData.Goal shadow = goal("Tumeken's shadow");
+		items.add(shadow.getId(), "Tumeken's shadow", 0, weapon(0, 0, 0, 35, 0, 0, 0, 5, true));
+		items.add(shadow.getBuyId(), "Tumeken's shadow (uncharged)", shadowPrice, null);
+		return method(shadow, "Tombs of Amascut (solo 450)");
+	}
+
+	private Plan plan(String goal, RebuildData.Method method, Planner.Settings settings, Overrides overrides)
+	{
+		return planner.plan(goal(goal), method, owned, 0, MAXED, settings, overrides);
+	}
+
+	private static boolean keeps(Plan plan, String name)
+	{
+		return plan.getKeeps().stream().anyMatch(k -> k.getName().equals(name));
+	}
+
+	private static Plan.Sale sale(Plan plan, int id)
+	{
+		return plan.getSales().stream().filter(s -> s.getItemId() == id).findFirst().orElse(null);
+	}
+
+	// ---- Tests ---------------------------------------------------------------
 
 	@Test
 	public void bundledDataLoads()
@@ -150,6 +206,7 @@ public class PlannerTest
 				assertTrue(method.getRoles().stream().anyMatch(RebuildData.Role::isMain));
 				for (RebuildData.Role role : method.getRoles())
 				{
+					assertTrue("Switches need their own target", role.isMain() || role.getTarget() != null);
 					for (RebuildData.Slot slot : role.getSlots())
 					{
 						assertEquals(slot.getItems().size(), slot.getIds().size());
@@ -171,83 +228,183 @@ public class PlannerTest
 	@Test
 	public void sellsSpareItemsBeforeTouchingTheKit()
 	{
-		final RebuildData.Goal shadow = goal("Tumeken's shadow");
-		final RebuildData.Method toa = method(shadow, "Tombs of Amascut (solo 450)");
-		items.add(shadow.getId(), "Tumeken's shadow", 0, new ItemInfo.Stats(0, 35, 0, 0, 0, 0, true));
-		items.add(shadow.getBuyId(), "Tumeken's shadow (uncharged)", 1_200_000_000L, null);
-
-		final int top = id(toa, "MAGIC", "Ancestral robe top");
-		items.add(top, "Ancestral robe top", 120_000_000L, magic(35, 3));
-
-		final Map<Integer, Long> owned = new HashMap<>();
-		owned.put(top, 1L);
+		final RebuildData.Method toa = toa(1_200_000_000L);
+		final int top = item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
 		owned.put(SPARE, 1L);
 		owned.put(PRAYER_POTION, 1000L);
 
-		final Plan plan = planner.plan(shadow, toa, owned, 0, MAXED, SETTINGS);
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, null);
 
 		assertTrue(plan.isFunded());
 		assertTrue(plan.getSwaps().isEmpty());
-		assertTrue(plan.getKeeps().stream().anyMatch(k -> k.getName().equals("Ancestral robe top")));
-		assertTrue(plan.getSales().stream().noneMatch(s -> s.getItemId() == top));
+		assertTrue(keeps(plan, "Ancestral robe top"));
+		assertTrue(sale(plan, top) == null);
 
-		final Plan.Sale potions = plan.getSales().stream()
-			.filter(s -> s.getItemId() == PRAYER_POTION).findFirst().orElse(null);
+		final Plan.Sale potions = sale(plan, PRAYER_POTION);
 		assertNotNull("1,000 prayer potions are worth 9m, so some should be offered", potions);
 		assertEquals(334, potions.getKept());
 		assertEquals(666, potions.getQuantity());
 	}
 
-	/** A switch is sold down before the main setup loses anything. */
+	/**
+	 * A Bow of faerdhinen switch keeps the crystal set together, and the Masori
+	 * and crossbow that the switch no longer uses are spare.
+	 */
 	@Test
-	public void swapsSwitchesBeforeTheMainSetup()
+	public void keepsCrystalWithBowfaAndSellsMasori()
 	{
-		final RebuildData.Goal shadow = goal("Tumeken's shadow");
-		final RebuildData.Method toa = method(shadow, "Tombs of Amascut (solo 450)");
-		items.add(shadow.getId(), "Tumeken's shadow", 0, new ItemInfo.Stats(0, 35, 0, 0, 0, 0, true));
-		items.add(shadow.getBuyId(), "Tumeken's shadow (uncharged)", 150_000_000L, null);
+		final RebuildData.Method toa = toa(1_200_000_000L);
+		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		item(toa, "RANGED", "Bow of faerdhinen", 40_000_000L, weapon(0, 0, 0, 0, 128, 0, 106, 4, true), 1);
+		item(toa, "RANGED", "Crystal helm", 2_000_000L, ranged(9, 0), 1);
+		item(toa, "RANGED", "Crystal body", 3_000_000L, ranged(31, 0), 1);
+		item(toa, "RANGED", "Crystal legs", 2_500_000L, ranged(18, 0), 1);
+		final int masori = item(toa, "RANGED", "Masori body (f)", 85_000_000L, ranged(43, 4), 1);
+		final int acb = item(toa, "RANGED", "Armadyl crossbow", 30_000_000L,
+			weapon(0, 0, 0, 0, 100, 0, 0, 5, false), 1);
+		final int bolts = item(toa, "RANGED", "Ruby dragon bolts (e)", 10_000L, ranged(0, 122), 1500);
+		owned.put(SPARE, 1L);
 
-		final int top = id(toa, "MAGIC", "Ancestral robe top");
-		final int masori = id(toa, "RANGED", "Masori body (f)");
-		items.add(top, "Ancestral robe top", 120_000_000L, magic(35, 3));
-		items.add(masori, "Masori body (f)", 160_000_000L, ranged(43, 4));
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, null);
 
-		final Map<Integer, Long> owned = new HashMap<>();
-		owned.put(top, 1L);
-		owned.put(masori, 1L);
+		assertTrue(keeps(plan, "Bow of faerdhinen"));
+		assertTrue(keeps(plan, "Crystal body"));
+		assertTrue(keeps(plan, "Crystal legs"));
+		assertFalse(keeps(plan, "Masori body (f)"));
+		assertFalse("Bolts do nothing for a Bowfa", keeps(plan, "Ruby dragon bolts (e)"));
+		assertNotNull(sale(plan, masori));
+		assertNotNull(sale(plan, acb));
+		assertEquals("No reserve of ammunition nothing fires", 1500, sale(plan, bolts).getQuantity());
+	}
 
-		final Plan plan = planner.plan(shadow, toa, owned, 0, MAXED, SETTINGS);
+	/** A Twisted bow fires arrows; bolts are spare however good they are. */
+	@Test
+	public void twistedBowKeepsArrowsNotBolts()
+	{
+		final RebuildData.Goal bow = goal("Twisted bow");
+		final RebuildData.Method doom = method(bow, "Doom of Mokhaiotl");
+		items.add(bow.getId(), "Twisted bow", 1_400_000_000L, weapon(0, 0, 0, 0, 70, 0, 20, 5, true));
+		final int bolts = item(doom, "RANGED", "Ruby dragon bolts (e)", 10_000L, ranged(0, 122), 2000);
+		item(doom, "RANGED", "Dragon arrow", 1_500L, ranged(0, 60), 5000);
+		owned.put(SPARE, 1L);
+
+		final Plan plan = plan("Twisted bow", doom, SETTINGS, null);
+
+		assertTrue(keeps(plan, "Dragon arrow"));
+		assertFalse(keeps(plan, "Ruby dragon bolts (e)"));
+		assertEquals(2000, sale(plan, bolts).getQuantity());
+	}
+
+	/** Against the ToA Warden a Fang with a defender beats a two-handed halberd. */
+	@Test
+	public void fangAndDefenderBeatTheHalberdAtToA()
+	{
+		final RebuildData.Method toa = toa(1_200_000_000L);
+		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		item(toa, "MELEE", "Osmumten's fang", 25_000_000L, weapon(105, 75, 0, 0, 0, 103, 0, 5, false), 1);
+		item(toa, "MELEE", "Avernic defender", 0, melee(30, 29, 8), 1);
+		items.untradeable.add(id(toa, "MELEE", "Avernic defender"));
+		final int halberd = item(toa, "MELEE", "Noxious halberd", 60_000_000L,
+			weapon(55, 132, 0, 0, 0, 142, 0, 5, true), 1);
+		owned.put(SPARE, 1L);
+
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, null);
+
+		assertTrue(keeps(plan, "Osmumten's fang"));
+		assertTrue(keeps(plan, "Avernic defender"));
+		assertFalse(keeps(plan, "Noxious halberd"));
+		assertNotNull(sale(plan, halberd));
+	}
+
+	/**
+	 * Switches are sold down as whole kits by price tier, so an expensive chest
+	 * is never kept over cheap legs.
+	 */
+	@Test
+	public void neverKeepsAnOathplateChestOverCheapLegs()
+	{
+		final RebuildData.Method toa = toa(150_000_000L);
+		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		item(toa, "MELEE", "Osmumten's fang", 25_000_000L, weapon(105, 75, 0, 0, 0, 103, 0, 5, false), 1);
+		item(toa, "MELEE", "Oathplate chest", 90_000_000L, melee(0, 0, 10), 1);
+		item(toa, "MELEE", "Oathplate legs", 65_000_000L, melee(0, 0, 8), 1);
+		item(toa, "MELEE", "Fighter torso", 0, melee(0, 0, 4), 1);
+		items.untradeable.add(id(toa, "MELEE", "Fighter torso"));
+		item(toa, "MELEE", "Bandos tassets", 25_000_000L, melee(0, 0, 2), 0);
+		item(toa, "MELEE", "Mixed hide legs", 1_000_000L, melee(0, 0, 0), 0);
+
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, null);
 
 		assertTrue(plan.isFunded());
-		assertEquals(1, plan.getSwaps().size());
-		assertEquals("Masori body (f)", plan.getSwaps().get(0).getSell());
-		assertEquals(0, plan.getDpsLossPct(), 0.001);
-		assertTrue(plan.getKeeps().stream().anyMatch(k -> k.getName().equals("Ancestral robe top")));
+		final boolean chestKept = keeps(plan, "Oathplate chest");
+		final boolean cheapLegs = plan.getSwaps().stream().anyMatch(s -> s.getUse().equals("Mixed hide legs"));
+		assertFalse("Oathplate chest over mixed hide legs", chestKept && cheapLegs);
+		assertTrue("The main setup is untouched", keeps(plan, "Ancestral robe top"));
+	}
+
+	/** An item the player crosses out is never sold; something else is found. */
+	@Test
+	public void honoursItemsThePlayerKeeps()
+	{
+		final RebuildData.Method toa = toa(1_200_000_000L);
+		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		final int second = 900_002;
+		items.add(second, "Second trophy", 1_500_000_000L, null);
+		owned.put(SPARE, 1L);
+		owned.put(second, 1L);
+
+		final Overrides overrides = new Overrides();
+		overrides.getExcluded().add(SPARE);
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, overrides);
+
+		assertTrue(plan.isFunded());
+		assertTrue(sale(plan, SPARE) == null);
+		assertNotNull(sale(plan, second));
+		assertEquals(1, plan.getExcluded().size());
+
+		// With nothing else to sell, the plan says it cannot be done.
+		overrides.getExcluded().add(second);
+		final Plan without = plan("Tumeken's shadow", toa, SETTINGS, overrides);
+		assertFalse(without.isFunded());
+		assertTrue(without.getShortfall() > 0);
+	}
+
+	/** The player can sell a different amount, and the plan works around it. */
+	@Test
+	public void usesThePlayersQuantity()
+	{
+		final RebuildData.Method toa = toa(1_200_000_000L);
+		owned.put(SPARE, 1L);
+		owned.put(PRAYER_POTION, 1000L);
+
+		final Overrides overrides = new Overrides();
+		overrides.getSellQuantity().put(PRAYER_POTION, 100L);
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, overrides);
+
+		final Plan.Sale potions = sale(plan, PRAYER_POTION);
+		assertNotNull(potions);
+		assertTrue(potions.isCustom());
+		assertEquals(100, potions.getQuantity());
+		assertEquals(900, potions.getKept());
 	}
 
 	/**
 	 * Owning Masori body (f) also counts as owning a plain Masori body, so the
-	 * planner once "swapped" the (f) for itself five times over, counting its
-	 * price each time. Every item may be sold once, and never to itself.
+	 * planner once "swapped" the (f) for itself five times over. Every item may
+	 * be sold once, and never to itself.
 	 */
 	@Test
 	public void neverSwapsAnItemForItself()
 	{
 		final RebuildData.Goal bow = goal("Twisted bow");
 		final RebuildData.Method doom = method(bow, "Doom of Mokhaiotl");
-		items.add(bow.getId(), "Twisted bow", 1_400_000_000L, new ItemInfo.Stats(0, 0, 70, 0, 20, 0, true));
+		items.add(bow.getId(), "Twisted bow", 1_400_000_000L, weapon(0, 0, 0, 0, 70, 0, 20, 5, true));
+		item(doom, "RANGED", "Masori body (f)", 85_000_000L, ranged(43, 4), 1);
+		item(doom, "RANGED", "Masori body", 9_000_000L, ranged(40, 2), 0);
 
-		final int bodyF = id(doom, "RANGED", "Masori body (f)");
-		final int body = id(doom, "RANGED", "Masori body");
-		items.add(bodyF, "Masori body (f)", 85_000_000L, ranged(43, 4));
-		items.add(body, "Masori body", 9_000_000L, ranged(40, 2));
+		final Plan plan = plan("Twisted bow", doom, new Planner.Settings(1_000_000, 3_000_000, 50, 40), null);
 
-		final Map<Integer, Long> owned = new HashMap<>();
-		owned.put(bodyF, 1L);
-
-		final Plan plan = planner.plan(bow, doom, owned, 0, MAXED, new Planner.Settings(1_000_000, 3_000_000, 50));
-
-		final java.util.Set<Integer> soldIds = new java.util.HashSet<>();
+		final Set<Integer> soldIds = new HashSet<>();
 		for (Plan.Swap swap : plan.getSwaps())
 		{
 			assertTrue("Sold twice: " + swap.getSell(), soldIds.add(swap.getSellId()));
@@ -262,24 +419,15 @@ public class PlannerTest
 	@Test
 	public void refusesToGutTheMainSetup()
 	{
-		final RebuildData.Goal shadow = goal("Tumeken's shadow");
-		final RebuildData.Method toa = method(shadow, "Tombs of Amascut (solo 450)");
-		items.add(shadow.getId(), "Tumeken's shadow", 0, new ItemInfo.Stats(0, 35, 0, 0, 0, 0, true));
-		items.add(shadow.getBuyId(), "Tumeken's shadow (uncharged)", 1_200_000_000L, null);
+		final RebuildData.Method toa = toa(1_200_000_000L);
+		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		item(toa, "MAGIC", "Ancestral robe bottom", 90_000_000L, magic(26, 3), 1);
 
-		final int top = id(toa, "MAGIC", "Ancestral robe top");
-		final int bottom = id(toa, "MAGIC", "Ancestral robe bottom");
-		items.add(top, "Ancestral robe top", 120_000_000L, magic(35, 3));
-		items.add(bottom, "Ancestral robe bottom", 90_000_000L, magic(26, 3));
-
-		final Map<Integer, Long> owned = new HashMap<>();
-		owned.put(top, 1L);
-		owned.put(bottom, 1L);
-
-		final Plan plan = planner.plan(shadow, toa, owned, 0, MAXED, new Planner.Settings(1_000_000, 3_000_000, 2));
+		final Plan plan = plan("Tumeken's shadow", toa, new Planner.Settings(1_000_000, 3_000_000, 2, 40), null);
 
 		assertFalse(plan.isFunded());
 		assertTrue(plan.getSwaps().isEmpty());
-		assertEquals(2, plan.getKeeps().size());
+		assertTrue(keeps(plan, "Ancestral robe top"));
+		assertTrue(keeps(plan, "Ancestral robe bottom"));
 	}
 }
