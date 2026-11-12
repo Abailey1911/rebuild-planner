@@ -225,6 +225,39 @@ public class PlannerTest
 		assertTrue(plan.getKeeps().stream().anyMatch(k -> k.getName().equals("Ancestral robe top")));
 	}
 
+	/**
+	 * Owning Masori body (f) also counts as owning a plain Masori body, so the
+	 * planner once "swapped" the (f) for itself five times over, counting its
+	 * price each time. Every item may be sold once, and never to itself.
+	 */
+	@Test
+	public void neverSwapsAnItemForItself()
+	{
+		final RebuildData.Goal bow = goal("Twisted bow");
+		final RebuildData.Method doom = method(bow, "Doom of Mokhaiotl");
+		items.add(bow.getId(), "Twisted bow", 1_400_000_000L, new ItemInfo.Stats(0, 0, 70, 0, 20, 0, true));
+
+		final int bodyF = id(doom, "RANGED", "Masori body (f)");
+		final int body = id(doom, "RANGED", "Masori body");
+		items.add(bodyF, "Masori body (f)", 85_000_000L, ranged(43, 4));
+		items.add(body, "Masori body", 9_000_000L, ranged(40, 2));
+
+		final Map<Integer, Long> owned = new HashMap<>();
+		owned.put(bodyF, 1L);
+
+		final Plan plan = planner.plan(bow, doom, owned, 0, MAXED, new Planner.Settings(1_000_000, 3_000_000, 50));
+
+		final java.util.Set<Integer> soldIds = new java.util.HashSet<>();
+		for (Plan.Swap swap : plan.getSwaps())
+		{
+			assertTrue("Sold twice: " + swap.getSell(), soldIds.add(swap.getSellId()));
+			assertFalse("Swapped for itself: " + swap.getSell(), swap.getSellId() == swap.getUseId());
+			assertFalse("The (f) cannot be replaced by what it already counts as",
+				swap.isUseOwned() && swap.getUse().equals("Masori body"));
+		}
+		assertTrue(plan.getRaised() <= 85_000_000L);
+	}
+
 	/** Ancestral is not sold when it would cost more damage than the cap allows. */
 	@Test
 	public void refusesToGutTheMainSetup()

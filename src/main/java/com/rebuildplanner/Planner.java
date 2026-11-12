@@ -468,6 +468,11 @@ public class Planner
 
 		long kitSold = 0;
 
+		// Everything sold so far. A sold item cannot also be the replacement:
+		// owning Masori body (f) counts as owning a Masori body, so without this
+		// the (f) was "swapped" for itself and its price counted again and again.
+		final Set<Integer> sold = new HashSet<>();
+
 		// ---- 2. Expensive switches --------------------------------------
 		if (raised < need)
 		{
@@ -485,7 +490,8 @@ public class Planner
 				long replacementCost = 0;
 				for (Option option : keep.options)
 				{
-					if (option.rank > keep.pick.rank && option.ownedId >= 0 && option.ownedId != soldId)
+					if (option.rank > keep.pick.rank && option.ownedId >= 0 && option.ownedId != soldId
+						&& !sold.contains(option.ownedId))
 					{
 						replacement = option;
 						// Using it means it is no longer sold with the rest.
@@ -534,6 +540,7 @@ public class Planner
 				}
 				raised += (long) move[2];
 				kitSold += (long) move[3];
+				sold.add(keep.pick.ownedId);
 				plan.getSwaps().add(new Plan.Swap(keep.pick.ownedId, replacement == null ? -1 : (replacement.ownedId >= 0 ? replacement.ownedId : replacement.listId),
 					label(keep.role), items.name(keep.pick.ownedId),
 					replacement == null ? "nothing in this slot" : replacement.name,
@@ -559,12 +566,14 @@ public class Planner
 			double bestNew = 0;
 			double bestRatio = 0;
 			boolean bestIsVoid = false;
+			boolean bestAltOwned = false;
 
 			for (Map.Entry<String, List<Option>> entry : mainOptions.entrySet())
 			{
 				final String slot = entry.getKey();
 				final Option pick = picks.get(slot);
-				if (pick == null || pick.ownedId < 0 || (useVoid && VOID_SLOTS.contains(slot)))
+				if (pick == null || pick.ownedId < 0 || sold.contains(pick.ownedId)
+					|| (useVoid && VOID_SLOTS.contains(slot)))
 				{
 					continue;
 				}
@@ -576,12 +585,15 @@ public class Planner
 
 				for (Option alt : entry.getValue())
 				{
-					if (alt == pick)
+					if (alt == pick || alt.listId == pick.ownedId)
 					{
 						continue;
 					}
+					// Only really owned if it is a different item that is not already sold.
+					final boolean altOwned = alt.ownedId >= 0 && alt.ownedId != pick.ownedId
+						&& !sold.contains(alt.ownedId);
 					long cost;
-					if (alt.ownedId >= 0)
+					if (altOwned)
 					{
 						final Plan.Sale queued = saleById.get(alt.ownedId);
 						cost = queued != null && queued.isNeeded() ? net(items.price(alt.ownedId)) : 0;
@@ -620,6 +632,7 @@ public class Planner
 						bestGross = price;
 						bestNew = s;
 						bestIsVoid = false;
+						bestAltOwned = altOwned;
 					}
 				}
 			}
@@ -662,37 +675,41 @@ public class Planner
 			final double loss = Math.max(0, (current - bestNew) / ownedScore * 100);
 			if (bestIsVoid)
 			{
-				final List<String> sold = new ArrayList<>();
+				final List<String> soldNames = new ArrayList<>();
 				final List<Integer> soldIds = new ArrayList<>();
 				for (String slot : VOID_SLOTS)
 				{
 					final Option pick = picks.get(slot);
 					if (pick != null && pick.ownedId >= 0 && items.tradeable(pick.ownedId))
 					{
-						sold.add(items.name(pick.ownedId));
+						soldNames.add(items.name(pick.ownedId));
 						soldIds.add(pick.ownedId);
+						sold.add(pick.ownedId);
 						keepQty.remove(pick.ownedId);
 					}
 				}
 				useVoid = true;
 				plan.setUsesVoid(true);
 				plan.getSwaps().add(new Plan.Swap(soldIds.isEmpty() ? ELITE_VOID_TOP : soldIds.get(0), ELITE_VOID_TOP,
-					label(mainRole), String.join(", ", sold),
+					label(mainRole), String.join(", ", soldNames),
 					"Elite void set", true, bestFreed, loss));
 			}
 			else
 			{
 				final Option pick = picks.get(bestSlot);
 				keepQty.remove(pick.ownedId);
-				if (bestAlt.ownedId >= 0)
+				sold.add(pick.ownedId);
+				if (bestAltOwned)
 				{
 					keepQty.put(bestAlt.ownedId, 1L);
 					plan.getSales().remove(saleById.remove(bestAlt.ownedId));
 				}
-				plan.getSwaps().add(new Plan.Swap(pick.ownedId, bestAlt.ownedId >= 0 ? bestAlt.ownedId : bestAlt.listId,
+				plan.getSwaps().add(new Plan.Swap(pick.ownedId, bestAltOwned ? bestAlt.ownedId : bestAlt.listId,
 					label(mainRole), items.name(pick.ownedId),
-					bestAlt.name, bestAlt.ownedId >= 0, bestFreed, loss));
-				picks.put(bestSlot, bestAlt);
+					bestAlt.name, bestAltOwned, bestFreed, loss));
+				// A bought replacement is a new item, not the one just sold.
+				picks.put(bestSlot, bestAltOwned ? bestAlt
+					: new Option(bestAlt.listId, bestAlt.rank, bestAlt.name, -1));
 			}
 			raised += bestFreed;
 			kitSold += bestGross;
