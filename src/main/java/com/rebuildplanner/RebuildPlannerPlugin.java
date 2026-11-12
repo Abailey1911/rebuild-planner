@@ -1,0 +1,257 @@
+/*
+ * Copyright (c) 2026, Alexb
+ * All rights reserved.
+ * Licensed under BSD 2-Clause. See LICENSE.
+ */
+package com.rebuildplanner;
+
+import com.google.gson.Gson;
+import com.google.inject.Provides;
+import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import javax.inject.Inject;
+import javax.swing.SwingUtilities;
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Client;
+import net.runelite.api.GameState;
+import net.runelite.api.ItemComposition;
+import net.runelite.api.Skill;
+import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.gameval.InventoryID;
+import net.runelite.client.callback.ClientThread;
+import net.runelite.client.config.ConfigManager;
+import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.game.ItemEquipmentStats;
+import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.ItemStats;
+import net.runelite.client.plugins.Plugin;
+import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.ui.ClientToolbar;
+import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.util.ImageUtil;
+
+@Slf4j
+@PluginDescriptor(
+	name = "Rebuild Planner",
+	description = "Pick a megarare and see what to sell from your bank to afford it, while keeping the gear you need to earn the money back",
+	tags = {"rebuild", "megarare", "bank", "sell", "twisted bow", "shadow", "scythe", "money"}
+)
+public class RebuildPlannerPlugin extends Plugin
+{
+	@Inject
+	private Client client;
+
+	@Inject
+	private ClientThread clientThread;
+
+	@Inject
+	private ClientToolbar clientToolbar;
+
+	@Inject
+	private ItemManager itemManager;
+
+	@Inject
+	private RebuildPlannerConfig config;
+
+	@Inject
+	private Holdings holdings;
+
+	@Inject
+	private Gson gson;
+
+	private List<RebuildData.Goal> goals;
+	private Planner planner;
+	private RebuildPanel panel;
+	private NavigationButton navButton;
+
+	/** Set when holdings change; the plan is rebuilt once on the next tick. */
+	private boolean dirty;
+
+	@Override
+	protected void startUp()
+	{
+		goals = RebuildData.loadGoals(gson);
+		final Map<String, List<Integer>> variants = RebuildData.loadVariants(gson);
+		planner = new Planner(new ClientItemInfo(), variants);
+
+		panel = new RebuildPanel(goals, this::requestPlan);
+
+		navButton = NavigationButton.builder()
+			.tooltip("Rebuild Planner")
+			.icon(icon())
+			.priority(7)
+			.panel(panel)
+			.build();
+		clientToolbar.addNavigation(navButton);
+
+		if (client.getGameState() == GameState.LOGGED_IN)
+		{
+			clientThread.invokeLater(this::readAll);
+		}
+	}
+
+	@Override
+	protected void shutDown()
+	{
+		clientToolbar.removeNavigation(navButton);
+		navButton = null;
+		panel = null;
+		holdings.clear();
+	}
+
+	private static BufferedImage icon()
+	{
+		return ImageUtil.resizeImage(
+			ImageUtil.loadImageResource(RebuildPlannerPlugin.class, "icon.png"), 16, 16);
+	}
+
+	@Subscribe
+	public void onGameStateChanged(GameStateChanged event)
+	{
+		if (event.getGameState() == GameState.LOGGED_IN)
+		{
+			clientThread.invokeLater(this::readAll);
+		}
+		else if (event.getGameState() == GameState.LOGIN_SCREEN)
+		{
+			holdings.clear();
+			dirty = true;
+		}
+	}
+
+	@Subscribe
+	public void onItemContainerChanged(ItemContainerChanged event)
+	{
+		final int id = event.getContainerId();
+		if (id == InventoryID.BANK || id == InventoryID.INV || id == InventoryID.WORN)
+		{
+			holdings.refresh(id);
+			dirty = true;
+		}
+	}
+
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		if (RebuildPlannerConfig.GROUP.equals(event.getGroup()))
+		{
+			dirty = true;
+		}
+	}
+
+	@Subscribe
+	public void onGameTick(GameTick tick)
+	{
+		if (dirty)
+		{
+			dirty = false;
+			recompute();
+		}
+	}
+
+	private void readAll()
+	{
+		holdings.refresh(InventoryID.BANK);
+		holdings.refresh(InventoryID.INV);
+		holdings.refresh(InventoryID.WORN);
+		recompute();
+	}
+
+	/** Called from the panel when the goal or method selection changes. */
+	private void requestPlan()
+	{
+		clientThread.invokeLater(this::recompute);
+	}
+
+	private void recompute()
+	{
+		final RebuildPanel target = panel;
+		if (target == null || goals == null || goals.isEmpty())
+		{
+			return;
+		}
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			SwingUtilities.invokeLater(() -> target.showMessage("Log in to plan a rebuild."));
+			return;
+		}
+
+		final RebuildData.Goal goal = target.selectedGoal();
+		if (goal == null)
+		{
+			return;
+		}
+
+		final Map<Integer, Long> owned = holdings.totals();
+		final long coins = owned.getOrDefault(Planner.COINS, 0L)
+			+ owned.getOrDefault(Planner.PLATINUM_TOKEN, 0L) * 1000L;
+		final DpsModel.Levels levels = new DpsModel.Levels(
+			client.getRealSkillLevel(Skill.ATTACK), client.getRealSkillLevel(Skill.STRENGTH),
+			client.getRealSkillLevel(Skill.RANGED), client.getRealSkillLevel(Skill.MAGIC));
+		final Planner.Settings settings = new Planner.Settings(
+			config.minStackValue(), config.supplyReserve(), config.maxDpsLoss());
+
+		final List<Plan> plans = new ArrayList<>();
+		for (RebuildData.Method method : goal.getMethods())
+		{
+			try
+			{
+				plans.add(planner.plan(goal, method, owned, coins, levels, settings));
+			}
+			catch (RuntimeException e)
+			{
+				log.warn("Could not plan {} via {}", goal.getName(), method.getName(), e);
+			}
+		}
+
+		final boolean bankSeen = holdings.isBankSeen();
+		SwingUtilities.invokeLater(() -> target.showPlans(goal, plans, bankSeen));
+	}
+
+	@Provides
+	RebuildPlannerConfig provideConfig(ConfigManager configManager)
+	{
+		return configManager.getConfig(RebuildPlannerConfig.class);
+	}
+
+	/** Item facts straight from the client; only ever called on the client thread. */
+	private final class ClientItemInfo implements ItemInfo
+	{
+		@Override
+		public String name(int itemId)
+		{
+			final ItemComposition composition = itemManager.getItemComposition(itemId);
+			return composition.getName();
+		}
+
+		@Override
+		public long price(int itemId)
+		{
+			return itemId <= 0 ? 0 : itemManager.getItemPrice(itemId);
+		}
+
+		@Override
+		public boolean tradeable(int itemId)
+		{
+			return itemManager.getItemComposition(itemId).isGeTradeable();
+		}
+
+		@Override
+		public Stats stats(int itemId)
+		{
+			final ItemStats stats = itemManager.getItemStats(itemId);
+			final ItemEquipmentStats e = stats == null ? null : stats.getEquipment();
+			if (e == null)
+			{
+				return null;
+			}
+			return new Stats(e.getAslash(), e.getAmagic(), e.getArange(), e.getStr(), e.getRstr(),
+				e.getMdmg(), e.isTwoHanded());
+		}
+	}
+}
