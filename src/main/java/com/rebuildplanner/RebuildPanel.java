@@ -996,6 +996,23 @@ public class RebuildPanel extends PluginPanel
 		addCard(card);
 	}
 
+	private void addBuys(Plan plan)
+	{
+		if (plan.getBuys().isEmpty())
+		{
+			return;
+		}
+		final JPanel card = card("Buy for the kit", BAD);
+		for (Plan.Buy buy : plan.getBuys())
+		{
+			card.add(row(buy.getItemId(), buy.getQuantity(), buy.getName(),
+				(buy.getQuantity() > 1 ? "Buy " + gp(buy.getQuantity()) + " &middot; " : "")
+					+ "<span style='color:" + hex(BAD) + "'>-" + gp(buy.getCost()) + "</span> &middot; "
+					+ esc(buy.getRole()), null));
+		}
+		addCard(card);
+	}
+
 	/** Every piece to hold on to, as a grid of pictures per setup. */
 	private void addKeeps(Plan plan)
 	{
