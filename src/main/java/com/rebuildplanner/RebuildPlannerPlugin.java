@@ -37,7 +37,7 @@ import net.runelite.client.util.ImageUtil;
 
 @Slf4j
 @PluginDescriptor(
-	name = "Rebuild Planner",
+	name = "Gear Upgrade: Rebuild Planner",
 	description = "Pick a megarare and see what to sell from your bank to afford it, while keeping the gear you need to earn the money back",
 	tags = {"rebuild", "megarare", "bank", "sell", "twisted bow", "shadow", "scythe", "money"}
 )
@@ -82,9 +82,11 @@ public class RebuildPlannerPlugin extends Plugin
 		panel = new RebuildPanel(goals, itemManager, this::requestPlan);
 
 		navButton = NavigationButton.builder()
-			.tooltip("Rebuild Planner")
+			.tooltip("Gear Upgrade: Rebuild Planner")
 			.icon(icon())
-			.priority(7)
+			// The sidebar sorts by priority, then tooltip. Sharing Gear Upgrade's
+			// priority and starting with its name keeps this directly beneath it.
+			.priority(6)
 			.panel(panel)
 			.build();
 		clientToolbar.addNavigation(navButton);

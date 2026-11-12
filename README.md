@@ -1,4 +1,6 @@
-# Rebuild Planner
+# Gear Upgrade: Rebuild Planner
+
+A companion to [Gear Upgrade](https://github.com/Abailey1911/gear-upgrade), listed directly beneath it in the sidebar.
 
 A RuneLite plugin for rebuilding into a megarare. Pick the item you want, and it reads
 your bank, inventory and worn gear to tell you:
