@@ -31,6 +31,8 @@ public final class RebuildData
 		/** The form sold on the Grand Exchange. */
 		private int buyId;
 		private String style;
+		/** Runes and the like for one full charge; never sold. */
+		private List<Charge> charges;
 		private List<Method> methods;
 
 		@Override
@@ -38,6 +40,14 @@ public final class RebuildData
 		{
 			return name;
 		}
+	}
+
+	@Data
+	public static class Charge
+	{
+		private int id;
+		private long qty;
+		private String name;
 	}
 
 	@Data

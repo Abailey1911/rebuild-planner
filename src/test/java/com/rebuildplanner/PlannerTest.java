@@ -196,7 +196,7 @@ public class PlannerTest
 	@Test
 	public void bundledDataLoads()
 	{
-		assertEquals(3, goals.size());
+		assertEquals(4, goals.size());
 		for (RebuildData.Goal goal : goals)
 		{
 			assertFalse(goal.getMethods().isEmpty());
@@ -413,6 +413,43 @@ public class PlannerTest
 				swap.isUseOwned() && swap.getUse().equals("Masori body"));
 		}
 		assertTrue(plan.getRaised() <= 85_000_000L);
+	}
+
+	/** A Tumeken's shadow is useless uncharged, so a full charge of runes is never sold. */
+	@Test
+	public void keepsOneFullChargeOfRunes()
+	{
+		final RebuildData.Method toa = toa(1_200_000_000L);
+		items.add(566, "Soul rune", 300, null);
+		items.add(562, "Chaos rune", 80, null);
+		owned.put(566, 60_000L);
+		owned.put(562, 50_000L);
+		owned.put(SPARE, 1L);
+
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, null);
+
+		final Plan.Sale souls = sale(plan, 566);
+		assertNotNull("Soul runes above a full charge can go", souls);
+		assertEquals(20_000, souls.getQuantity());
+		assertEquals(40_000, souls.getKept());
+		assertTrue("Chaos runes are short of a charge, so none are sold", sale(plan, 562) == null);
+		assertTrue("...and the rest are bought",
+			plan.getBuys().stream().anyMatch(b -> b.getItemId() == 562 && b.getQuantity() == 50_000));
+		assertTrue(plan.getKeeps().stream().anyMatch(k -> k.getItemId() == 566 && k.getQuantity() == 40_000));
+	}
+
+	/** The Obligator rebuild earns at the Fractured Archive with all three styles. */
+	@Test
+	public void obligatorRebuildUsesTheFracturedArchive()
+	{
+		final RebuildData.Goal obligator = goal("Obligator");
+		final RebuildData.Method tfa = method(obligator, "The Fractured Archive");
+		assertEquals(3, tfa.getRoles().size());
+		assertEquals("Ezekiel", tfa.getTarget().getName());
+		id(tfa, "MELEE", "Inquisitor's hauberk");
+		id(tfa, "RANGED", "Masori body (f)");
+		id(tfa, "MAGIC", "Ancestral robe top");
+		assertEquals(3, obligator.getCharges().size());
 	}
 
 	/** Ancestral is not sold when it would cost more damage than the cap allows. */

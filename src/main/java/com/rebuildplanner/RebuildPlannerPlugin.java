@@ -21,6 +21,7 @@ import net.runelite.api.Skill;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
@@ -141,6 +142,16 @@ public class RebuildPlannerPlugin extends Plugin
 		if (id == InventoryID.BANK || id == InventoryID.INV || id == InventoryID.WORN)
 		{
 			holdings.refresh(id);
+			dirty = true;
+		}
+	}
+
+	@Subscribe
+	public void onVarbitChanged(VarbitChanged event)
+	{
+		if (holdings.isBankSeen() && Holdings.isPotionStoreVarp(event.getVarpId()))
+		{
+			holdings.refreshPotionStore();
 			dirty = true;
 		}
 	}

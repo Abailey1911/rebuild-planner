@@ -20,6 +20,7 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +33,8 @@ import javax.swing.JEditorPane;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
+import javax.swing.JScrollPane;
+import javax.swing.SwingUtilities;
 import javax.swing.JTextField;
 import javax.swing.SwingConstants;
 import javax.swing.border.EmptyBorder;
@@ -87,14 +90,69 @@ public class RebuildPanel extends PluginPanel
 
 	private List<Plan> plans = new ArrayList<>();
 	private boolean bankSeen;
+	/** The plan as it stood just before the player's last change, to show what moved. */
+	private Map<Integer, Long> before;
+	private Map<Integer, String> beforeNames;
+	/** What the player just did, e.g. "You kept Abyssal dagger (p++)". */
+	private String changeReason;
+	private int changedItem = -1;
+	/** The outcome of the last change, kept on screen until the next one. */
+	private List<String[]> changes;
+	private boolean scrollToTop;
+
 	/** True while the method list is being refilled, to ignore its events. */
 	private boolean filling;
 
 	public RebuildPanel(List<RebuildData.Goal> goals, ItemManager itemManager, Actions actions)
 	{
 		this.itemManager = itemManager;
-		this.actions = actions;
-		setLayout(new BorderLayout(0, 8));
+		final Actions raw = actions;
+		this.actions = new Actions()
+		{
+			@Override
+			public void changed()
+			{
+				changes = null;
+				before = null;
+				scrollToTop = true;
+				raw.changed();
+			}
+
+			@Override
+			public void exclude(int itemId)
+			{
+				remember(itemId, "You kept " + nameOf(itemId));
+				raw.exclude(itemId);
+			}
+
+			@Override
+			public void restore(int itemId)
+			{
+				remember(itemId, "You let " + nameOf(itemId) + " be sold again");
+				raw.restore(itemId);
+			}
+
+			@Override
+			public void setQuantity(int itemId, long quantity)
+			{
+				remember(itemId, "You changed " + nameOf(itemId) + " to sell " + gp(quantity));
+				raw.setQuantity(itemId, quantity);
+			}
+
+			@Override
+			public void clearQuantity(int itemId)
+			{
+				remember(itemId, "You put " + nameOf(itemId) + " back to the suggested amount");
+				raw.clearQuantity(itemId);
+			}
+
+			@Override
+			public void resetAll()
+			{
+				remember(-1, "You reset all your changes");
+				raw.resetAll();
+			}
+		};		setLayout(new BorderLayout(0, 8));
 		setBorder(new EmptyBorder(8, 8, 8, 8));
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
 
@@ -140,12 +198,14 @@ public class RebuildPanel extends PluginPanel
 		{
 			fillMethods();
 			updateHero();
-			actions.changed();
+			this.actions.changed();
 		});
 		methodBox.addActionListener(e ->
 		{
 			if (!filling)
 			{
+				changes = null;
+				scrollToTop = true;
 				render();
 			}
 		});
@@ -411,6 +471,12 @@ public class RebuildPanel extends PluginPanel
 	public void showPlans(RebuildData.Goal goal, List<Plan> plans, boolean bankSeen, boolean hasOverrides)
 	{
 		this.hasOverrides = hasOverrides;
+		// Jump to the top the moment the bank is first read, not wherever the
+		// instructions happened to leave the scroll position.
+		if (bankSeen && !this.bankSeen)
+		{
+			scrollToTop = true;
+		}
 		if (goal != selectedGoal())
 		{
 			return;
@@ -424,6 +490,148 @@ public class RebuildPanel extends PluginPanel
 	{
 		content.revalidate();
 		content.repaint();
+		if (scrollToTop)
+		{
+			scrollToTop = false;
+			SwingUtilities.invokeLater(() ->
+			{
+				final JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
+				if (scroll != null)
+				{
+					scroll.getVerticalScrollBar().setValue(0);
+				}
+			});
+		}
+	}
+
+	// ---- What changed ------------------------------------------------------
+
+	private String nameOf(int itemId)
+	{
+		final Plan plan = selectedPlan();
+		if (plan != null)
+		{
+			for (Plan.Sale sale : plan.getSales())
+			{
+				if (sale.getItemId() == itemId)
+				{
+					return sale.getName();
+				}
+			}
+			for (Plan.Swap swap : plan.getSwaps())
+			{
+				if (swap.getSellId() == itemId)
+				{
+					return swap.getSell();
+				}
+			}
+			for (Plan.Excluded item : plan.getExcluded())
+			{
+				if (item.getItemId() == itemId)
+				{
+					return item.getName();
+				}
+			}
+		}
+		return "that item";
+	}
+
+	/** Everything the plan currently sells, by item, with names. */
+	private static Map<Integer, Long> soldBy(Plan plan, Map<Integer, String> names)
+	{
+		final Map<Integer, Long> sold = new HashMap<>();
+		if (plan == null)
+		{
+			return sold;
+		}
+		for (Plan.Sale sale : plan.getSales())
+		{
+			if (sale.isNeeded())
+			{
+				sold.merge(sale.getItemId(), sale.getQuantity(), Long::sum);
+				names.put(sale.getItemId(), sale.getName());
+			}
+		}
+		for (Plan.Swap swap : plan.getSwaps())
+		{
+			sold.merge(swap.getSellId(), 1L, Long::sum);
+			names.put(swap.getSellId(), swap.getSell());
+		}
+		return sold;
+	}
+
+	private void remember(int itemId, String reason)
+	{
+		beforeNames = new HashMap<>();
+		before = soldBy(selectedPlan(), beforeNames);
+		changeReason = reason;
+		changedItem = itemId;
+		scrollToTop = true;
+	}
+
+	/** Compares the new plan with the one before the player's change. */
+	private void diff(Plan plan)
+	{
+		if (before == null)
+		{
+			return;
+		}
+		final Map<Integer, String> names = new HashMap<>(beforeNames);
+		final Map<Integer, Long> after = soldBy(plan, names);
+		changes = new ArrayList<>();
+		for (Map.Entry<Integer, Long> entry : after.entrySet())
+		{
+			final long was = before.getOrDefault(entry.getKey(), 0L);
+			if (entry.getKey() != changedItem && entry.getValue() > was)
+			{
+				changes.add(new String[]{"+", String.valueOf(entry.getKey()), names.get(entry.getKey()),
+					was == 0 ? "now sold" : "sell " + gp(entry.getValue()) + " instead of " + gp(was)});
+			}
+		}
+		for (Map.Entry<Integer, Long> entry : before.entrySet())
+		{
+			final long now = after.getOrDefault(entry.getKey(), 0L);
+			if (entry.getKey() != changedItem && now < entry.getValue())
+			{
+				changes.add(new String[]{"-", String.valueOf(entry.getKey()), names.get(entry.getKey()),
+					now == 0 ? "no longer needed" : "sell " + gp(now) + " instead of " + gp(entry.getValue())});
+			}
+		}
+		before = null;
+	}
+
+	private void addChanges(Plan plan)
+	{
+		if (changes == null)
+		{
+			return;
+		}
+		final JPanel card = card("What changed", ColorScheme.BRAND_ORANGE);
+		final JPanel header = left(new JPanel(new BorderLayout()));
+		header.setBackground(CARD);
+		header.add(text(esc(changeReason) + ".", 0, Color.WHITE), BorderLayout.CENTER);
+		header.add(button("\u2715", "Hide", MUTED, () ->
+		{
+			changes = null;
+			render();
+		}), BorderLayout.EAST);
+		card.add(header);
+		card.add(Box.createVerticalStrut(4));
+
+		if (changes.isEmpty())
+		{
+			card.add(text(plan.isFunded()
+				? "Nothing else had to change - the items already listed still cover it."
+				: "Nothing else can make up the difference.", 0, plan.isFunded() ? MUTED : BAD));
+		}
+		for (String[] change : changes)
+		{
+			final boolean added = "+".equals(change[0]);
+			card.add(row(Integer.parseInt(change[1]), 1, change[2],
+				"<span style='color:" + hex(added ? WARN : GOOD) + "'>" + (added ? "Added: " : "Dropped: ")
+					+ esc(change[3]) + "</span>", null));
+		}
+		addCard(card);
 	}
 
 	private void render()
@@ -449,7 +657,9 @@ public class RebuildPanel extends PluginPanel
 			return;
 		}
 
+		diff(plan);
 		addSummary(plan);
+		addChanges(plan);
 		addEarnBack(plan);
 		addSales(plan);
 		addSwaps(plan);
@@ -790,10 +1000,11 @@ public class RebuildPanel extends PluginPanel
 			grid.setBackground(CARD);
 			for (Plan.Keep keep : entry.getValue())
 			{
-				final JLabel picture = icon(keep.getItemId(), 1);
+				final JLabel picture = icon(keep.getItemId(), keep.getQuantity());
 				picture.setOpaque(true);
 				picture.setBackground(ColorScheme.DARK_GRAY_COLOR);
-				picture.setToolTipText(keep.getName());
+				picture.setToolTipText(keep.getQuantity() > 1
+					? gp(keep.getQuantity()) + " x " + keep.getName() + " - one full charge" : keep.getName());
 				grid.add(picture);
 			}
 			card.add(grid);

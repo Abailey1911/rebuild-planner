@@ -639,6 +639,23 @@ public class Planner
 			}
 		}
 
+		// Enough runes for one full charge of the megarare stay, whatever else goes.
+		final List<RebuildData.Charge> charges = goal.getCharges() == null
+			? Collections.emptyList() : goal.getCharges();
+		for (RebuildData.Charge charge : charges)
+		{
+			final long have = owned.getOrDefault(charge.getId(), 0L);
+			keepQty.put(charge.getId(), Math.max(keepQty.getOrDefault(charge.getId(), 0L), charge.getQty()));
+			if (have < charge.getQty())
+			{
+				final long cost = items.price(charge.getId()) * (charge.getQty() - have);
+				plan.getBuys().add(new Plan.Buy(charge.getId(), "Charges", "CHARGE", charge.getName(),
+					charge.getQty() - have, cost));
+				buyCost += cost;
+			}
+		}
+		plan.setBuyCost(buyCost);
+
 		// ---- 1. Everything the kit does not use ----------------------------
 		final long need = Math.max(0, plan.getGoalPrice() + buyCost - coins);
 		plan.setNeeded(need);
@@ -693,9 +710,9 @@ public class Planner
 			}
 			pool.add(new Plan.Sale(id, name, sell, held - sell, held, sell * net(price), true, custom != null));
 		}
-		// Player-set quantities first, then the biggest earners.
-		pool.sort(Comparator.comparing(Plan.Sale::isCustom).reversed()
-			.thenComparing(Comparator.comparingLong(Plan.Sale::getProceeds).reversed()));
+		// Ordered by what the whole stack is worth, so changing an amount does not
+		// move the row out from under the player's cursor.
+		pool.sort(Comparator.comparingLong((Plan.Sale s) -> s.getHeld() * items.price(s.getItemId())).reversed());
 
 		long raised = 0;
 		for (Plan.Sale sale : pool)
@@ -910,8 +927,11 @@ public class Planner
 						&& !excluded.contains(pick.ownedId))
 					{
 						sold.add(pick.ownedId);
-						plan.getSwaps().add(new Plan.Swap(pick.ownedId, ELITE_VOID_TOP, main.label,
-							items.name(pick.ownedId), "Elite void", true, net(items.price(pick.ownedId))));
+						final int voidPiece = "HEAD".equals(slot) ? voidHelm(main.data.getStyle())
+							: "BODY".equals(slot) ? ELITE_VOID_TOP : "LEGS".equals(slot) ? ELITE_VOID_ROBE : VOID_GLOVES;
+						plan.getSwaps().add(new Plan.Swap(pick.ownedId, ownedForm(voidPiece) >= 0 ? ownedForm(voidPiece) : voidPiece,
+							main.label, items.name(pick.ownedId), items.name(voidPiece), true,
+							net(items.price(pick.ownedId))));
 					}
 				}
 				useVoid = true;
@@ -944,7 +964,7 @@ public class Planner
 				for (int id : new int[]{voidHelm(role.data.getStyle()), ELITE_VOID_TOP, ELITE_VOID_ROBE, VOID_GLOVES})
 				{
 					final int held = ownedForm(id);
-					plan.getKeeps().add(new Plan.Keep(held >= 0 ? held : id, role.label, "VOID", items.name(id)));
+					plan.getKeeps().add(new Plan.Keep(held >= 0 ? held : id, role.label, "VOID", items.name(id), 1));
 				}
 			}
 			for (Map.Entry<String, Option> entry : role.current.entrySet())
@@ -953,9 +973,14 @@ public class Planner
 				if (option != null && option.ownedId >= 0 && !sold.contains(option.ownedId)
 					&& !(role.main && useVoid && VOID_SLOTS.contains(entry.getKey())))
 				{
-					plan.getKeeps().add(new Plan.Keep(option.ownedId, role.label, entry.getKey(), option.name));
+					plan.getKeeps().add(new Plan.Keep(option.ownedId, role.label, entry.getKey(), option.name, 1));
 				}
 			}
+		}
+
+		for (RebuildData.Charge charge : charges)
+		{
+			plan.getKeeps().add(new Plan.Keep(charge.getId(), "Charges", "CHARGE", charge.getName(), charge.getQty()));
 		}
 
 		final double bestDps = dps(main, bestPossible(main), false);

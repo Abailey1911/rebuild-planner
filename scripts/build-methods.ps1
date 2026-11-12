@@ -1,4 +1,6 @@
-param([string]$GearRes, [string]$Out)
+# -Equipment is the wiki DPS calculator's equipment list:
+# https://raw.githubusercontent.com/weirdgloop/osrs-dps-calc/main/cdn/json/equipment.json
+param([Parameter(Mandatory)][string]$GearRes, [Parameter(Mandatory)][string]$Out, [Parameter(Mandatory)][string]$Equipment)
 $ErrorActionPreference = 'Stop'
 
 $tables = @()
@@ -26,12 +28,49 @@ function Target($name) {
 	if (-not $m) { throw "No monster $name" }
 	[ordered]@{ name = $m.name; defenceLevel = $m.defenceLevel; magicLevel = $m.magicLevel; dstab = $m.dstab; dslash = $m.dslash; dcrush = $m.dcrush; dmagic = $m.dmagic; drange = $m.drange }
 }
+# Item name -> id, from the wiki DPS calculator's equipment list.
+$equip = Get-Content $Equipment -Raw | ConvertFrom-Json
+$idByName = @{}
+foreach ($e in $equip) { $k = $e.name.ToLower(); if (-not $idByName.ContainsKey($k) -or $e.version -eq 'Charged') { $idByName[$k] = [int]$e.id } }
+
+# Bosses with no Gear Upgrade entry, from their wiki infoboxes. Ranged defence
+# is the 'standard' value, which arrows and bolts are rolled against.
+function Stats($name, $def, $mage, $dstab, $dslash, $dcrush, $dmagic, $drange) {
+	[ordered]@{ name = $name; defenceLevel = $def; magicLevel = $mage; dstab = $dstab; dslash = $dslash; dcrush = $dcrush; dmagic = $dmagic; drange = $drange }
+}
+$ezekiel = Stats 'Ezekiel' 200 200 150 90 35 200 370
+$moia = Stats 'Moia' 195 350 20 110 15 30 120
+
+# A setup straight from a wiki strategy page's Recommended equipment block.
+$wikiSlot = @{ head = 'HEAD'; neck = 'AMULET'; cape = 'CAPE'; body = 'BODY'; legs = 'LEGS'; weapon = 'WEAPON'; shield = 'SHIELD'; ammo = 'AMMO'; hands = 'GLOVES'; feet = 'BOOTS'; ring = 'RING' }
+function PageRole($page, $label, $style, $main, $target) {
+	$m = [regex]::Matches($page, '(?s)\{\{Recommended equipment(.*?)\n\}\}') | Where-Object { $_.Groups[1].Value -match ('(?m)^\|\s*style\s*=\s*' + [regex]::Escape($label) + '\s*$') } | Select-Object -First 1
+	if (-not $m) { throw "No block '$label'" }
+	$slots = [ordered]@{}
+	foreach ($row in [regex]::Matches($m.Groups[1].Value, '(?m)^\|\s*([a-z]+)(\d+)\s*=\s*(.*)$')) {
+		$key = $wikiSlot[$row.Groups[1].Value]; if (-not $key) { continue }
+		if (-not $slots.Contains($key)) { $slots[$key] = [ordered]@{ slot = $key; items = @(); ids = @() } }
+		foreach ($p in [regex]::Matches($row.Groups[3].Value, '\{\{plink\|([^|}]+)')) {
+			$n = $p.Groups[1].Value.Trim(); $id = $idByName[$n.ToLower()]
+			if (-not $id -or ($slots[$key].items -contains $n)) { continue }
+			$slots[$key].items += $n; $slots[$key].ids += $id
+		}
+	}
+	$r = [ordered]@{ style = $style; main = $main; slots = @($slots.Values | Where-Object { $_.items.Count -gt 0 }) }
+	if ($target) { $r.target = $target }
+	$r
+}
+$tfa = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'tfa-strategies.wikitext'))
+
+# What a full charge of each weapon costs, so the runes are never sold off.
+function Charge($id, $qty, $name) { [ordered]@{ id = $id; qty = $qty; name = $name } }
+
 # A switch is a handful of pieces, not a second full setup.
 $switchSlots = 'WEAPON', 'SHIELD', 'HEAD', 'BODY', 'LEGS', 'AMULET', 'CAPE', 'AMMO'
 
 $goals = @(
 	[ordered]@{
-		name = 'Twisted bow'; id = 20997; buyId = 20997; style = 'RANGED'
+		name = 'Twisted bow'; id = 20997; buyId = 20997; style = 'RANGED'; charges = @()
 		methods = @(
 			[ordered]@{
 				name = 'Doom of Mokhaiotl (delves 1-8)'; gpPerHour = 9518000
@@ -49,6 +88,7 @@ $goals = @(
 	},
 	[ordered]@{
 		name = "Tumeken's shadow"; id = 27275; buyId = 27277; style = 'MAGIC'
+		charges = @((Charge 566 40000 'Soul rune'), (Charge 562 100000 'Chaos rune'))
 		methods = @(
 			[ordered]@{
 				name = 'Tombs of Amascut (solo 450)'; gpPerHour = 5529000
@@ -72,6 +112,7 @@ $goals = @(
 	},
 	[ordered]@{
 		name = 'Scythe of vitur'; id = 22325; buyId = 22486; style = 'MELEE'
+		charges = @((Charge 565 40000 'Blood rune'), (Charge 22446 200 'Vial of blood'))
 		methods = @(
 			[ordered]@{
 				name = 'Theatre of Blood'; gpPerHour = 8044000
@@ -94,6 +135,25 @@ $goals = @(
 		)
 	}
 )
+
+$goals += [ordered]@{
+	name = 'Obligator'; id = 34715; buyId = 34717; style = 'MELEE'
+	charges = @((Charge 34669 667 'Ascension shards'), (Charge 561 40000 'Nature rune'), (Charge 560 40000 'Death rune'))
+	methods = @(
+		[ordered]@{
+			name = 'The Fractured Archive (duo)'; gpPerHour = 23686000
+			note = 'Wiki rate for duos. The Obligator does the melee bosses; Masori and Ancestral switches handle the rest, after the wiki strategy page.'
+			target = $ezekiel; gearMultiplier = 3
+			roles = @((PageRole $tfa 'Melee switch' 'MELEE' $true $null), (PageRole $tfa 'Ranged switch' 'RANGED' $false $moia), (PageRole $tfa 'Magic switch' 'MAGIC' $false $moia))
+		},
+		[ordered]@{
+			name = 'The Fractured Archive (trio)'; gpPerHour = 20274000
+			note = 'Wiki rate for trios.'
+			target = $ezekiel; gearMultiplier = 3
+			roles = @((PageRole $tfa 'Melee switch' 'MELEE' $true $null), (PageRole $tfa 'Ranged switch' 'RANGED' $false $moia), (PageRole $tfa 'Magic switch' 'MAGIC' $false $moia))
+		}
+	)
+}
 
 $doc = [ordered]@{
 	note = 'gpPerHour figures are from the OSRS Wiki money making guide (CC BY-NC-SA 3.0), snapshot 2026-11-11. Gear lists follow the wiki strategy pages.'

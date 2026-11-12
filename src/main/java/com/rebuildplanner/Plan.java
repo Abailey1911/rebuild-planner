@@ -24,6 +24,8 @@ public class Plan
 		String role;
 		String slot;
 		String name;
+		/** More than 1 for runes held back to charge the weapon. */
+		long quantity;
 	}
 
 	/** Gear the method needs that the player does not own. */
