@@ -135,15 +135,51 @@ public class Planner
 	{
 		final long tier;
 		final boolean allowBuy;
+		/** The switch being sold down, so a slot can buy a fair replacement; null otherwise. */
+		final Role role;
 
 		Rules(long tier, boolean allowBuy)
 		{
+			this(tier, allowBuy, null);
+		}
+
+		Rules(long tier, boolean allowBuy, Role role)
+		{
 			this.tier = tier;
 			this.allowBuy = allowBuy;
+			this.role = role;
+		}
+
+		/**
+		 * Most a replacement may cost in a slot. Where the piece the player
+		 * owned is being sold, up to half its price - selling Oathplate legs
+		 * and buying Bandos tassets still frees most of the money, and leaves
+		 * a real pair of legs. Elsewhere, the tier itself.
+		 */
+		long buyCap(String slot)
+		{
+			if (role != null && slot != null && role.start != null)
+			{
+				final Option was = role.start.get(slot);
+				if (was != null && was.ownedId >= 0 && items.tradeable(was.ownedId))
+				{
+					final long price = items.price(was.ownedId);
+					if (price > tier)
+					{
+						return Math.max(tier, price / 2);
+					}
+				}
+			}
+			return tier;
+		}
+
+		long cost(Option option)
+		{
+			return cost(null, option);
 		}
 
 		/** -1 when the option may not be used; 0 when it is owned and kept; else its cost. */
-		long cost(Option option)
+		long cost(String slot, Option option)
 		{
 			if (option.ownedId >= 0 && !sold.contains(option.ownedId))
 			{
@@ -160,7 +196,7 @@ public class Planner
 				return -1;
 			}
 			final long price = items.price(option.listId);
-			return price > 0 && price <= tier ? price : -1;
+			return price > 0 && price <= buyCap(slot) ? price : -1;
 		}
 	}
 
@@ -329,7 +365,7 @@ public class Planner
 		{
 			for (Option option : role.slots.getOrDefault("WEAPON", Collections.emptyList()))
 			{
-				if (rules.cost(option) >= 0 && items.stats(option.listId) != null)
+				if (rules.cost("WEAPON", option) >= 0 && items.stats(option.listId) != null)
 				{
 					weapons.add(option);
 				}
@@ -365,10 +401,10 @@ public class Planner
 					}
 					Option pick = loadout.get(slot);
 					double pickScore = dps(role, loadout, useVoid);
-					long pickCost = pick == null ? 0 : rules.cost(pick);
+					long pickCost = pick == null ? 0 : rules.cost(slot, pick);
 					for (Option option : entry.getValue())
 					{
-						final long cost = rules.cost(option);
+						final long cost = rules.cost(slot, option);
 						if (cost < 0 || isVoidPiece(option.listId)
 							|| ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
 						{
@@ -378,8 +414,17 @@ public class Planner
 						final double score = dps(role, loadout, useVoid);
 						// Better damage wins; on a tie the cheaper item, and an
 						// owned piece over an empty slot.
+						// Better damage wins. On a tie the wiki's order stands, except
+						// that an owned piece beats a bought one. An empty slot takes an
+						// owned piece freely, and a bought one only where the piece the
+						// player had is being sold - armour is more than its damage, so
+						// sold Oathplate legs become Bandos tassets, not bare legs.
+						final boolean tie = score > pickScore - 1e-9;
+						final boolean wasFilled = rules.role != null && rules.role.start != null
+							&& rules.role.start.get(slot) != null;
 						if (score > pickScore + 1e-9
-							|| (score > pickScore - 1e-9 && (pick == null ? cost == 0 : cost < pickCost)))
+							|| (tie && pick == null && (cost == 0 || wasFilled))
+							|| (tie && pick != null && cost == 0 && pickCost > 0))
 						{
 							pick = option;
 							pickScore = score;
@@ -420,7 +465,7 @@ public class Planner
 		Option cheapest = current;
 		for (Option option : role.slots.getOrDefault("AMMO", Collections.emptyList()))
 		{
-			if (rules.cost(option) < 0 || !isAmmunition(option)
+			if (rules.cost("AMMO", option) < 0 || !isAmmunition(option)
 				|| !DpsModel.ammoFits(items, weaponId, option.listId))
 			{
 				continue;
@@ -446,7 +491,7 @@ public class Planner
 			{
 				continue;
 			}
-			final long cost = Math.max(0, rules.cost(option));
+			final long cost = Math.max(0, rules.cost(entry.getKey(), option));
 			total += "AMMO".equals(entry.getKey()) && cost > 0 ? cost * ammoReserve(option.listId) : cost;
 		}
 		return total;
@@ -773,7 +818,7 @@ public class Planner
 				final double lossSoFar = loss(role, role.current);
 				for (int t = tier.getOrDefault(role, -1) + 1; t < SWITCH_TIERS.length; t++)
 				{
-					final Rules rules = new Rules(SWITCH_TIERS[t], true);
+					final Rules rules = new Rules(SWITCH_TIERS[t], true, role);
 					final Map<String, Option> loadout = tierCache
 						.computeIfAbsent(role, k -> new HashMap<>())
 						.computeIfAbsent(t, k -> choose(role, rules, false));
@@ -821,7 +866,7 @@ public class Planner
 			{
 				continue;
 			}
-			kitSold += describe(plan, role, new Rules(SWITCH_TIERS[tier.get(role)], true), roles);
+			kitSold += describe(plan, role, new Rules(SWITCH_TIERS[tier.get(role)], true, role), roles);
 			plan.getRoleLoss().put(role.label, loss(role, role.current));
 		}
 
@@ -1062,9 +1107,10 @@ public class Planner
 	private List<Option> soldBy(Role role, Map<String, Option> loadout, List<Role> roles, Rules rules)
 	{
 		final Set<Integer> stillUsed = new HashSet<>(mainKept);
-		for (Option option : loadout.values())
+		for (Map.Entry<String, Option> entry : loadout.entrySet())
 		{
-			if (option != null && option.ownedId >= 0 && rules.cost(option) == 0)
+			final Option option = entry.getValue();
+			if (option != null && option.ownedId >= 0 && rules.cost(entry.getKey(), option) == 0)
 			{
 				stillUsed.add(option.ownedId);
 			}
@@ -1126,11 +1172,11 @@ public class Planner
 				}
 			}
 			final Option use = slot == null ? null : role.current.get(slot);
-			final boolean useOwned = use != null && rules.cost(use) == 0;
+			final boolean useOwned = use != null && rules.cost(slot, use) == 0;
 			long cost = 0;
 			if (use != null && !useOwned)
 			{
-				cost = Math.max(0, rules.cost(use)) * ("AMMO".equals(slot) ? ammoReserve(use.listId) : 1);
+				cost = Math.max(0, rules.cost(slot, use)) * ("AMMO".equals(slot) ? ammoReserve(use.listId) : 1);
 				replacedSlots.add(slot);
 			}
 			sold.add(gone.ownedId);
@@ -1144,13 +1190,13 @@ public class Planner
 		for (Map.Entry<String, Option> entry : role.current.entrySet())
 		{
 			final Option use = entry.getValue();
-			if (use == null || replacedSlots.contains(entry.getKey()) || rules.cost(use) <= 0)
+			if (use == null || replacedSlots.contains(entry.getKey()) || rules.cost(entry.getKey(), use) <= 0)
 			{
 				continue;
 			}
 			final long qty = "AMMO".equals(entry.getKey()) && isAmmunition(use) ? ammoReserve(use.listId) : 1;
 			plan.getBuys().add(new Plan.Buy(use.listId, role.label, entry.getKey(), use.name, qty,
-				rules.cost(use) * qty));
+				rules.cost(entry.getKey(), use) * qty));
 		}
 		return gross;
 	}

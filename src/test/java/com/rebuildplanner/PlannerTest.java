@@ -323,7 +323,7 @@ public class PlannerTest
 	@Test
 	public void neverKeepsAnOathplateChestOverCheapLegs()
 	{
-		final RebuildData.Method toa = toa(150_000_000L);
+		final RebuildData.Method toa = toa(120_000_000L);
 		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
 		item(toa, "MELEE", "Osmumten's fang", 25_000_000L, weapon(105, 75, 0, 0, 0, 103, 0, 5, false), 1);
 		item(toa, "MELEE", "Oathplate chest", 90_000_000L, melee(0, 0, 10), 1);
@@ -340,6 +340,29 @@ public class PlannerTest
 		final boolean cheapLegs = plan.getSwaps().stream().anyMatch(s -> s.getUse().equals("Mixed hide legs"));
 		assertFalse("Oathplate chest over mixed hide legs", chestKept && cheapLegs);
 		assertTrue("The main setup is untouched", keeps(plan, "Ancestral robe top"));
+	}
+
+	/** Selling Oathplate legs from a switch buys real legs in their place, not nothing. */
+	@Test
+	public void replacesSoldOathplateLegsWithTassets()
+	{
+		final RebuildData.Method toa = toa(120_000_000L);
+		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		item(toa, "MELEE", "Osmumten's fang", 25_000_000L, weapon(105, 75, 0, 0, 0, 103, 0, 5, false), 1);
+		item(toa, "MELEE", "Oathplate chest", 90_000_000L, melee(0, 0, 10), 1);
+		item(toa, "MELEE", "Oathplate legs", 65_000_000L, melee(0, 0, 8), 1);
+		item(toa, "MELEE", "Fighter torso", 0, melee(0, 0, 4), 1);
+		items.untradeable.add(id(toa, "MELEE", "Fighter torso"));
+		item(toa, "MELEE", "Bandos tassets", 25_000_000L, melee(0, 0, 2), 0);
+
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, null);
+
+		assertTrue(plan.isFunded());
+		final Plan.Swap legs = plan.getSwaps().stream()
+			.filter(s -> s.getSell().equals("Oathplate legs")).findFirst().orElse(null);
+		assertNotNull(legs);
+		assertEquals("Bandos tassets", legs.getUse());
+		assertFalse(legs.isUseOwned());
 	}
 
 	/** Void only works as a full set, so a lone void piece never fills a switch slot. */

@@ -99,6 +99,8 @@ public class RebuildPanel extends PluginPanel
 	/** The outcome of the last change, kept on screen until the next one. */
 	private List<String[]> changes;
 	private boolean scrollToTop;
+	/** Scroll position to restore after the next render, or -1. */
+	private int keepScroll = -1;
 
 	/** True while the method list is being refilled, to ignore its events. */
 	private boolean filling;
@@ -491,9 +493,23 @@ public class RebuildPanel extends PluginPanel
 	{
 		content.revalidate();
 		content.repaint();
-		if (scrollToTop)
+		if (!scrollToTop && keepScroll >= 0)
+		{
+			final int position = keepScroll;
+			keepScroll = -1;
+			SwingUtilities.invokeLater(() ->
+			{
+				final JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
+				if (scroll != null)
+				{
+					scroll.getVerticalScrollBar().setValue(position);
+				}
+			});
+		}
+		else if (scrollToTop)
 		{
 			scrollToTop = false;
+			keepScroll = -1;
 			SwingUtilities.invokeLater(() ->
 			{
 				final JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
@@ -561,13 +577,20 @@ public class RebuildPanel extends PluginPanel
 		return sold;
 	}
 
+	private int currentScroll()
+	{
+		final JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
+		return scroll == null ? -1 : scroll.getVerticalScrollBar().getValue();
+	}
+
 	private void remember(int itemId, String reason)
 	{
 		beforeNames = new HashMap<>();
 		before = soldBy(selectedPlan(), beforeNames);
 		changeReason = reason;
 		changedItem = itemId;
-		scrollToTop = true;
+		// Stay where the player was: they are working down the list.
+		keepScroll = currentScroll();
 	}
 
 	/** Compares the new plan with the one before the player's change. */
