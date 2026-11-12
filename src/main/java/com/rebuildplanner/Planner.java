@@ -1034,23 +1034,27 @@ public class Planner
 				for (int id : new int[]{voidHelm(role.data.getStyle()), ELITE_VOID_TOP, ELITE_VOID_ROBE, VOID_GLOVES})
 				{
 					final int held = ownedForm(id);
-					plan.getKeeps().add(new Plan.Keep(held >= 0 ? held : id, role.label, "VOID", items.name(id), 1));
+					plan.getKeeps().add(new Plan.Keep(held >= 0 ? held : id, role.label, "VOID", items.name(id), 1, false));
 				}
 			}
 			for (Map.Entry<String, Option> entry : role.current.entrySet())
 			{
 				final Option option = entry.getValue();
-				if (option != null && option.ownedId >= 0 && !sold.contains(option.ownedId)
-					&& !(role.main && useVoid && VOID_SLOTS.contains(entry.getKey())))
+				if (option == null || (role.main && useVoid && VOID_SLOTS.contains(entry.getKey())))
 				{
-					plan.getKeeps().add(new Plan.Keep(option.ownedId, role.label, entry.getKey(), option.name, 1));
+					continue;
 				}
+				// The kit as it ends up: pieces held on to, plus the ones the swaps
+				// say to buy, so each setup reads as one complete loadout.
+				final boolean held = option.ownedId >= 0 && !sold.contains(option.ownedId);
+				plan.getKeeps().add(new Plan.Keep(held ? option.ownedId : option.listId, role.label,
+					entry.getKey(), option.name, 1, !held));
 			}
 		}
 
 		for (RebuildData.Charge charge : charges)
 		{
-			plan.getKeeps().add(new Plan.Keep(charge.getId(), "Charges", "CHARGE", charge.getName(), charge.getQty()));
+			plan.getKeeps().add(new Plan.Keep(charge.getId(), "Charges", "CHARGE", charge.getName(), charge.getQty(), false));
 		}
 
 		// Is it worth it at all? Compare the rebuilt setup with what the player

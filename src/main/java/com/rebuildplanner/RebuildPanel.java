@@ -701,12 +701,12 @@ public class RebuildPanel extends PluginPanel
 		diff(plan);
 		addSummary(plan);
 		addChanges(plan);
+		addKeeps(plan);
 		addEarnBack(plan);
-		addSales(plan);
 		addSwaps(plan);
+		addSales(plan);
 		addBuys(plan);
 		addExcluded(plan);
-		addKeeps(plan);
 		refresh();
 	}
 	// ---- Sections --------------------------------------------------------
@@ -1049,7 +1049,8 @@ public class RebuildPanel extends PluginPanel
 			return;
 		}
 
-		final JPanel card = card("Keep - do not sell", ColorScheme.LIGHT_GRAY_COLOR);
+		boolean anyToBuy = false;
+		final JPanel card = card("Your kit - keep, do not sell", ColorScheme.LIGHT_GRAY_COLOR);
 		for (Map.Entry<String, List<Plan.Keep>> entry : byRole.entrySet())
 		{
 			card.add(caption(entry.getKey()));
@@ -1060,14 +1061,20 @@ public class RebuildPanel extends PluginPanel
 				final JLabel picture = icon(keep.getItemId(), keep.getQuantity());
 				picture.setOpaque(true);
 				picture.setBackground(ColorScheme.DARK_GRAY_COLOR);
-				picture.setToolTipText(keep.getQuantity() > 1
+				if (keep.isToBuy())
+				{
+					anyToBuy = true;
+					picture.setBorder(BorderFactory.createLineBorder(WARN, 1));
+				}
+				picture.setToolTipText(keep.isToBuy() ? "Buy: " + keep.getName() + " (replaces a piece you sell)" : keep.getQuantity() > 1
 					? gp(keep.getQuantity()) + " x " + keep.getName() + " - one full charge" : keep.getName());
 				grid.add(picture);
 			}
 			card.add(grid);
 			card.add(Box.createVerticalStrut(6));
 		}
-		card.add(text("Hover a picture for its name.", INNER - 20, MUTED));
+		card.add(text("Hover a picture for its name." + (anyToBuy ? " <span style='color:" + hex(WARN)
+			+ "'>Outlined</span> pieces are bought to replace ones you sell." : ""), INNER - 20, MUTED));
 		addCard(card);
 	}
 }

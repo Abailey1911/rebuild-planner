@@ -26,6 +26,8 @@ public class Plan
 		String name;
 		/** More than 1 for runes held back to charge the weapon. */
 		long quantity;
+		/** True for a piece the swaps tell the player to buy, not one they hold. */
+		boolean toBuy;
 	}
 
 	/** Gear the method needs that the player does not own. */
