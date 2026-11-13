@@ -21,6 +21,24 @@ your bank, inventory and worn gear to tell you:
    lost, and only up to a damage cap (15% by default). Selling Ancestral to afford a
    Tumeken's shadow loses more than it gains, so the plugin will not suggest it.
 
+Enough runes for one full charge of the megarare are always held back, and if the
+rebuilt setup would barely beat the weapon you already use, the plan says it is not
+worth it.
+
+## Making it your own
+
+Open your bank once so the plugin can read it, then use the **Sell** tab:
+
+- **✕** next to anything you would rather keep; the plan makes it up elsewhere or tells
+  you it cannot.
+- **Change an amount** on any stack, e.g. sell 5k soul runes rather than 10k.
+- **Pick the replacement** for a kit piece being sold - click the ▾ beside it for every
+  option in that slot, best first (Bandos tassets in place of Oathplate legs, say).
+- **Sell something else** - add an item the plan was keeping, such as your current weapon.
+- **Save** a plan under a name and reopen or update it later.
+
+A "What changed" card shows what each of your changes added to or dropped from the plan.
+
 ## Megarares and methods
 
 | Megarare | Earn it back at |
@@ -28,12 +46,16 @@ your bank, inventory and worn gear to tell you:
 | Twisted bow | Doom of Mokhaiotl (delves 1-8), Phantom Muspah |
 | Tumeken's shadow | Tombs of Amascut (450 or expert), The Whisperer |
 | Scythe of vitur | Theatre of Blood, Duke Sucellus, Vardorvis |
+| Obligator | The Fractured Archive |
 
 ## Settings
 
 - **Smallest stack to sell** - bank stacks worth less than this are ignored (default 1m).
 - **Supplies to keep** - gp of each supply stack held back (default 3m).
 - **Most damage to give up** - cap on damage lost from the main setup (default 15%).
+- **Most switch damage to give up** - how far raid switches may be sold down (default 40%).
+- **Least damage gain to rebuild** - below this gain over your current weapon, the plan
+  says the rebuild is not worth it (default 10%).
 
 ## Data
 

@@ -44,6 +44,15 @@ public interface ItemInfo
 
 	boolean tradeable(int itemId);
 
+	/**
+	 * What it costs to get one: its price, or for an item that is made rather
+	 * than bought, the price of its parts. 0 when it cannot be had for gp.
+	 */
+	default long buyPrice(int itemId)
+	{
+		return tradeable(itemId) ? price(itemId) : 0;
+	}
+
 	/** Null when the item is not equipment. */
 	Stats stats(int itemId);
 }

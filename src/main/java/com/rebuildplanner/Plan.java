@@ -77,6 +77,24 @@ public class Plan
 		boolean useOwned;
 		/** Net gp gained, after tax and after paying for the replacement. */
 		long freed;
+		/** Everything else the slot could use instead, best first; empty when there is no choice. */
+		List<Choice> choices;
+		/** True when the player picked the replacement themselves. */
+		boolean custom;
+	}
+
+	/** One thing a sold kit piece could be replaced with. */
+	@Value
+	public static class Choice
+	{
+		/** The id to hand back when the player picks this. */
+		int id;
+		/** The id to draw: the form the player holds, when they hold one. */
+		int iconId;
+		String name;
+		boolean owned;
+		/** What it costs to buy; 0 when owned. */
+		long price;
 	}
 
 	/** Something the player has said not to sell. */
@@ -104,6 +122,8 @@ public class Plan
 	private final List<Sale> sales = new ArrayList<>();
 	private final List<Swap> swaps = new ArrayList<>();
 	private final List<Excluded> excluded = new ArrayList<>();
+	/** Things the player holds that the plan leaves alone but they could choose to sell; price is the stack's value. */
+	private final List<Choice> addable = new ArrayList<>();
 	/** Damage given up per setup, in percent, for setups that were sold down. */
 	private final Map<String, Double> roleLoss = new LinkedHashMap<>();
 

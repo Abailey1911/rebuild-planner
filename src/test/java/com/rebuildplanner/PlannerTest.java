@@ -38,6 +38,14 @@ public class PlannerTest
 		final Map<Integer, Long> prices = new HashMap<>();
 		final Map<Integer, Stats> stats = new HashMap<>();
 		final Set<Integer> untradeable = new HashSet<>();
+		/** Cost of the parts, for items that are made rather than bought. */
+		final Map<Integer, Long> made = new HashMap<>();
+
+		@Override
+		public long buyPrice(int itemId)
+		{
+			return tradeable(itemId) ? price(itemId) : made.getOrDefault(itemId, 0L);
+		}
 
 		void add(int id, String name, long price, Stats s)
 		{
@@ -363,6 +371,80 @@ public class PlannerTest
 		assertNotNull(legs);
 		assertEquals("Bandos tassets", legs.getUse());
 		assertFalse(legs.isUseOwned());
+	}
+
+	/** The player can pick what replaces a sold piece from the slot's list. */
+	@Test
+	public void usesTheReplacementThePlayerPicks()
+	{
+		final RebuildData.Method toa = toa(120_000_000L);
+		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		item(toa, "MELEE", "Osmumten's fang", 25_000_000L, weapon(105, 75, 0, 0, 0, 103, 0, 5, false), 1);
+		item(toa, "MELEE", "Oathplate chest", 90_000_000L, melee(0, 0, 10), 1);
+		final int oathLegs = item(toa, "MELEE", "Oathplate legs", 65_000_000L, melee(0, 0, 8), 1);
+		item(toa, "MELEE", "Fighter torso", 0, melee(0, 0, 4), 1);
+		items.untradeable.add(id(toa, "MELEE", "Fighter torso"));
+		item(toa, "MELEE", "Bandos tassets", 25_000_000L, melee(0, 0, 2), 0);
+		final int hide = item(toa, "MELEE", "Mixed hide legs", 1_000_000L, melee(0, 0, 0), 0);
+
+		final Overrides overrides = new Overrides();
+		overrides.getReplacement().put(oathLegs, hide);
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, overrides);
+
+		final Plan.Swap legs = plan.getSwaps().stream()
+			.filter(s -> s.getSell().equals("Oathplate legs")).findFirst().orElse(null);
+		assertNotNull(legs);
+		assertEquals("Mixed hide legs", legs.getUse());
+		assertTrue(legs.isCustom());
+		assertTrue("The other legs stay on offer",
+			legs.getChoices().stream().anyMatch(c -> c.getName().equals("Bandos tassets")));
+	}
+
+	/** A helm that is made, not bought, is still on offer: a faceguard costs a helm and a jaw. */
+	@Test
+	public void offersItemsThatAreMadeFromParts()
+	{
+		final RebuildData.Method toa = toa(120_000_000L);
+		item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		item(toa, "MELEE", "Osmumten's fang", 25_000_000L, weapon(105, 75, 0, 0, 0, 103, 0, 5, false), 1);
+		final int torva = item(toa, "MELEE", "Torva full helm", 300_000_000L, melee(0, 0, 8), 1);
+		item(toa, "MELEE", "Oathplate helm", 60_000_000L, melee(0, 0, 7), 0);
+		final int faceguard = item(toa, "MELEE", "Neitiznot faceguard", 0, melee(0, 0, 6), 0);
+		items.untradeable.add(faceguard);
+		items.made.put(faceguard, 25_000_000L);
+
+		final Overrides overrides = new Overrides();
+		overrides.getReplacement().put(torva, faceguard);
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, overrides);
+
+		final Plan.Swap helm = plan.getSwaps().stream()
+			.filter(s -> s.getSell().equals("Torva full helm")).findFirst().orElse(null);
+		assertNotNull(helm);
+		assertEquals("Neitiznot faceguard", helm.getUse());
+		assertTrue(helm.getChoices().stream().anyMatch(c -> c.getId() == faceguard && c.getPrice() == 25_000_000L));
+	}
+
+	/** Something the plan was keeping can be put up for sale by the player. */
+	@Test
+	public void sellsWhatThePlayerAdds()
+	{
+		final RebuildData.Method toa = toa(1_200_000_000L);
+		final int top = item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		item(toa, "MELEE", "Osmumten's fang", 25_000_000L, weapon(105, 75, 0, 0, 0, 103, 0, 5, false), 1);
+		owned.put(SPARE, 1L);
+
+		final Plan before = plan("Tumeken's shadow", toa, SETTINGS, null);
+		assertTrue(keeps(before, "Ancestral robe top"));
+		assertTrue(before.getAddable().stream().anyMatch(c -> c.getId() == top));
+
+		final Overrides overrides = new Overrides();
+		overrides.getForceSell().add(top);
+		final Plan plan = plan("Tumeken's shadow", toa, SETTINGS, overrides);
+
+		assertFalse(keeps(plan, "Ancestral robe top"));
+		final Plan.Sale sale = sale(plan, top);
+		assertNotNull(sale);
+		assertTrue(sale.isNeeded());
 	}
 
 	/** Void only works as a full set, so a lone void piece never fills a switch slot. */

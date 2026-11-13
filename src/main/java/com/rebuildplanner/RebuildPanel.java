@@ -64,6 +64,24 @@ public class RebuildPanel extends PluginPanel
 
 		void clearQuantity(int itemId);
 
+		/** Keep the current megarare, method and changes under a name; saving an existing name updates it. */
+		void savePlan(String name, String goal, String method);
+
+		void loadPlan(String name);
+
+		/** Start again with no changes and no saved plan open. */
+		void newPlan();
+
+		void deletePlan(String name);
+
+		/** Sell something the plan was leaving alone. */
+		void addSale(int itemId);
+
+		/** Use this item in place of a kit piece that is being sold. */
+		void setReplacement(int soldId, int useId);
+
+		void clearReplacement(int soldId);
+
 		void resetAll();
 	}
 
@@ -102,7 +120,9 @@ public class RebuildPanel extends PluginPanel
 	private List<String[]> changes;
 	private boolean scrollToTop;
 
-	private static final String[] TABS = {"Plan", "Kit", "Sell"};
+	/** Plan is what you end up with; Sell is everything you can act on to get there. */
+	private static final String[] TABS = {"Plan", "Sell"};
+	private static final int SELL_TAB = 1;
 	private final JPanel tabRow = new JPanel(new GridLayout(1, 0, 3, 0));
 	private final JToggleButton[] tabButtons = new JToggleButton[TABS.length];
 	/** One-line verdict shown on every tab, so a change made on Sell shows its effect at once. */
@@ -158,6 +178,57 @@ public class RebuildPanel extends PluginPanel
 			}
 
 			@Override
+			public void savePlan(String name, String goal, String method)
+			{
+				raw.savePlan(name, goal, method);
+			}
+
+			@Override
+			public void loadPlan(String name)
+			{
+				changes = null;
+				before = null;
+				scrollToTop = true;
+				raw.loadPlan(name);
+			}
+
+			@Override
+			public void newPlan()
+			{
+				changes = null;
+				before = null;
+				scrollToTop = true;
+				raw.newPlan();
+			}
+
+			@Override
+			public void deletePlan(String name)
+			{
+				raw.deletePlan(name);
+			}
+
+			@Override
+			public void addSale(int itemId)
+			{
+				remember(itemId, "You added " + nameOf(itemId) + " to the sell list");
+				raw.addSale(itemId);
+			}
+
+			@Override
+			public void setReplacement(int soldId, int useId)
+			{
+				remember(soldId, "You chose what replaces " + nameOf(soldId));
+				raw.setReplacement(soldId, useId);
+			}
+
+			@Override
+			public void clearReplacement(int soldId)
+			{
+				remember(soldId, "You went back to the suggested swap for " + nameOf(soldId));
+				raw.clearReplacement(soldId);
+			}
+
+			@Override
 			public void resetAll()
 			{
 				remember(-1, "You reset all your changes");
@@ -187,6 +258,53 @@ public class RebuildPanel extends PluginPanel
 		hero.add(heroText, BorderLayout.CENTER);
 		top.add(hero);
 		top.add(Box.createVerticalStrut(6));
+
+		// Saved plans: pick one to open it, Save to keep (or update) what is on screen.
+		top.add(caption("Plan"));
+		planBox.addItem(NEW_PLAN);
+		top.add(planBox);
+		top.add(Box.createVerticalStrut(3));
+		final JPanel planButtons = new JPanel(new GridLayout(1, 0, 3, 0));
+		planButtons.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		for (javax.swing.JButton button : new javax.swing.JButton[]{saveButton, newButton, deleteButton})
+		{
+			button.setFont(FontManager.getRunescapeSmallFont());
+			button.setFocusPainted(false);
+			button.setMargin(new java.awt.Insets(2, 2, 2, 2));
+			planButtons.add(button);
+		}
+		saveButton.setToolTipText("Save this megarare, method and your changes. Saving an open plan updates it.");
+		newButton.setToolTipText("Start a fresh plan with none of your changes");
+		deleteButton.setToolTipText("Delete the saved plan that is open");
+		top.add(left(planButtons));
+		top.add(Box.createVerticalStrut(6));
+		planBox.addActionListener(e ->
+		{
+			if (fillingPlans)
+			{
+				return;
+			}
+			final String choice = (String) planBox.getSelectedItem();
+			if (choice == null || NEW_PLAN.equals(choice))
+			{
+				this.actions.newPlan();
+			}
+			else
+			{
+				this.actions.loadPlan(choice);
+			}
+		});
+		saveButton.addActionListener(e -> saveClicked());
+		newButton.addActionListener(e -> this.actions.newPlan());
+		deleteButton.addActionListener(e ->
+		{
+			final String open = openPlan();
+			if (open != null && javax.swing.JOptionPane.showConfirmDialog(this, "Delete the saved plan \"" + open + "\"?",
+				"Rebuild Planner", javax.swing.JOptionPane.OK_CANCEL_OPTION) == javax.swing.JOptionPane.OK_OPTION)
+			{
+				this.actions.deletePlan(open);
+			}
+		});
 
 		top.add(caption("Rebuild to"));
 		for (RebuildData.Goal goal : goals)
@@ -231,6 +349,10 @@ public class RebuildPanel extends PluginPanel
 		updateHero();
 		goalBox.addActionListener(e ->
 		{
+			if (loading)
+			{
+				return;
+			}
 			fillMethods();
 			updateHero();
 			this.actions.changed();
@@ -293,6 +415,11 @@ public class RebuildPanel extends PluginPanel
 			setOpaque(false);
 			setBorder(null);
 			setHighlighter(null);
+			// Otherwise the caret drags the scroll pane to whichever text was built last.
+			if (getCaret() instanceof javax.swing.text.DefaultCaret)
+			{
+				((javax.swing.text.DefaultCaret) getCaret()).setUpdatePolicy(javax.swing.text.DefaultCaret.NEVER_UPDATE);
+			}
 			// Height depends on width, so re-measure once the real width is known.
 			addComponentListener(new ComponentAdapter()
 			{
@@ -436,6 +563,95 @@ public class RebuildPanel extends PluginPanel
 		}
 	}
 
+	// ---- Saved plans -------------------------------------------------------
+
+	private static final String NEW_PLAN = "New plan (not saved)";
+	private final JComboBox<String> planBox = new JComboBox<>();
+	private final javax.swing.JButton saveButton = new javax.swing.JButton("Save");
+	private final javax.swing.JButton newButton = new javax.swing.JButton("New");
+	private final javax.swing.JButton deleteButton = new javax.swing.JButton("Delete");
+	/** True while the plan list is being refilled, to ignore its events. */
+	private boolean fillingPlans;
+	/** True while a saved plan's megarare is being selected, so it is not taken for a fresh start. */
+	private boolean loading;
+
+	/** Name of the saved plan that is open, or null. */
+	private String openPlan()
+	{
+		final String choice = (String) planBox.getSelectedItem();
+		return choice == null || NEW_PLAN.equals(choice) ? null : choice;
+	}
+
+	/** Refills the plan list. Runs on the Swing thread. */
+	public void setSavedPlans(List<String> names, String open)
+	{
+		fillingPlans = true;
+		planBox.removeAllItems();
+		planBox.addItem(NEW_PLAN);
+		for (String name : names)
+		{
+			planBox.addItem(name);
+		}
+		planBox.setSelectedItem(open != null && names.contains(open) ? open : NEW_PLAN);
+		fillingPlans = false;
+		deleteButton.setEnabled(openPlan() != null);
+		saveButton.setText(openPlan() != null ? "Save" : "Save as…");
+	}
+
+	/** Shows a saved plan's megarare and method without treating it as the player starting over. */
+	public void select(String goalName, String methodName)
+	{
+		loading = true;
+		for (int i = 0; i < goalBox.getItemCount(); i++)
+		{
+			if (goalBox.getItemAt(i).getName().equals(goalName))
+			{
+				goalBox.setSelectedIndex(i);
+			}
+		}
+		loading = false;
+		fillMethods();
+		updateHero();
+		filling = true;
+		methodBox.setSelectedItem(AUTO);
+		for (int i = 0; i < methodBox.getItemCount(); i++)
+		{
+			if (methodBox.getItemAt(i).equals(methodName))
+			{
+				methodBox.setSelectedIndex(i);
+			}
+		}
+		filling = false;
+	}
+
+	private void saveClicked()
+	{
+		final RebuildData.Goal goal = selectedGoal();
+		if (goal == null)
+		{
+			return;
+		}
+		String name = openPlan();
+		if (name == null)
+		{
+			final Object typed = javax.swing.JOptionPane.showInputDialog(this, "Name this plan", "Rebuild Planner",
+				javax.swing.JOptionPane.PLAIN_MESSAGE, null, null, goal.getName() + " rebuild");
+			name = typed == null ? "" : typed.toString().trim();
+			if (name.isEmpty() || NEW_PLAN.equals(name))
+			{
+				return;
+			}
+		}
+		final Object method = methodBox.getSelectedItem();
+		actions.savePlan(name, goal.getName(), method == null || AUTO.equals(method) ? null : method.toString());
+		// A moment's confirmation, since saving an open plan changes nothing on screen.
+		saveButton.setText("Saved ✓");
+		final javax.swing.Timer back = new javax.swing.Timer(1500,
+			e -> saveButton.setText(openPlan() != null ? "Save" : "Save as…"));
+		back.setRepeats(false);
+		back.start();
+	}
+
 	public RebuildData.Goal selectedGoal()
 	{
 		return (RebuildData.Goal) goalBox.getSelectedItem();
@@ -528,32 +744,118 @@ public class RebuildPanel extends PluginPanel
 	{
 		content.revalidate();
 		content.repaint();
-		if (!scrollToTop && keepScroll >= 0)
+		final int position = scrollToTop ? 0 : keepScroll;
+		if (scrollToTop)
 		{
-			final int position = keepScroll;
-			keepScroll = -1;
-			SwingUtilities.invokeLater(() ->
-			{
-				final JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
-				if (scroll != null)
-				{
-					scroll.getVerticalScrollBar().setValue(position);
-				}
-			});
+			held = null;
 		}
-		else if (scrollToTop)
+		scrollToTop = false;
+		keepScroll = -1;
+		if (position >= 0)
 		{
-			scrollToTop = false;
-			keepScroll = -1;
-			SwingUtilities.invokeLater(() ->
-			{
-				final JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
-				if (scroll != null)
-				{
-					scroll.getVerticalScrollBar().setValue(0);
-				}
-			});
+			scrollTo(position);
 		}
+	}
+
+	/**
+	 * Puts the scroll bar back where it was. The text re-wraps once it learns its
+	 * real width, which changes the page's height a moment after it is built -
+	 * setting the position only once would be clamped against the wrong height
+	 * and land at the bottom - so it is applied again as the layout settles.
+	 */
+	private void scrollTo(int position)
+	{
+		if (scrollTimer != null)
+		{
+			scrollTimer.stop();
+		}
+		final int[] runs = {0};
+		lastTarget = position;
+		final Runnable apply = () ->
+		{
+			final JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
+			if (scroll == null)
+			{
+				return;
+			}
+			// Prefer keeping a row the player was looking at exactly where it was:
+			// cards appearing or growing above it would otherwise push it away.
+			int target = position;
+			if (held != null)
+			{
+				for (Object[] row : held)
+				{
+					final JComponent now = anchors.get(row[0]);
+					if (now != null && now.getParent() != null)
+					{
+						target = yOf(now, scroll) - (Integer) row[1];
+						break;
+					}
+				}
+			}
+			lastTarget = Math.max(0, target);
+			scroll.getVerticalScrollBar().setValue(lastTarget);
+		};
+		SwingUtilities.invokeLater(apply);
+		scrollTimer = new javax.swing.Timer(40, e ->
+		{
+			apply.run();
+			if (++runs[0] >= 5)
+			{
+				((javax.swing.Timer) e.getSource()).stop();
+			}
+		});
+		scrollTimer.start();
+	}
+
+	private javax.swing.Timer scrollTimer;
+	private int lastTarget;
+	/** Rows on screen now, by a key that survives a redraw, e.g. "sale:4151". */
+	private final Map<String, JComponent> anchors = new java.util.LinkedHashMap<>();
+	/** Rows that were in view before the redraw, each with how far down the viewport it sat. */
+	private List<Object[]> held;
+
+	private <T extends JComponent> T anchor(String key, T row)
+	{
+		anchors.put(key, row);
+		return row;
+	}
+
+	private static int yOf(JComponent row, JScrollPane scroll)
+	{
+		return SwingUtilities.convertPoint(row.getParent(), row.getLocation(), scroll.getViewport().getView()).y;
+	}
+
+	/** Notes which rows are in view, so the redraw can put one of them back in the same place. */
+	private void holdRows(int changedItem)
+	{
+		held = null;
+		final JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
+		if (scroll == null)
+		{
+			return;
+		}
+		final int top = scroll.getVerticalScrollBar().getValue();
+		final int bottom = top + scroll.getViewport().getHeight();
+		final List<Object[]> rows = new ArrayList<>();
+		final List<Object[]> changed = new ArrayList<>();
+		for (Map.Entry<String, JComponent> entry : anchors.entrySet())
+		{
+			final JComponent row = entry.getValue();
+			if (row.getParent() == null)
+			{
+				continue;
+			}
+			final int y = yOf(row, scroll);
+			if (y + row.getHeight() <= top || y >= bottom)
+			{
+				continue;
+			}
+			// The row that was changed may move or vanish, so it is the last resort.
+			(entry.getKey().endsWith(":" + changedItem) ? changed : rows).add(new Object[]{entry.getKey(), y - top});
+		}
+		rows.addAll(changed);
+		held = rows;
 	}
 
 	// ---- What changed ------------------------------------------------------
@@ -626,6 +928,7 @@ public class RebuildPanel extends PluginPanel
 		changedItem = itemId;
 		// Stay where the player was: they are working down the list.
 		keepScroll = currentScroll();
+		holdRows(itemId);
 	}
 
 	/** Compares the new plan with the one before the player's change. */
@@ -712,6 +1015,21 @@ public class RebuildPanel extends PluginPanel
 
 	private void render()
 	{
+		// Any redraw that is not a deliberate jump to the top stays where the player is.
+		if (keepScroll < 0 && !scrollToTop)
+		{
+			if (scrollTimer != null && scrollTimer.isRunning())
+			{
+				// A second redraw while the first is still settling: keep aiming for the same place.
+				keepScroll = lastTarget;
+			}
+			else
+			{
+				keepScroll = currentScroll();
+				holdRows(-1);
+			}
+		}
+		anchors.clear();
 		content.removeAll();
 		tabRow.setVisible(bankSeen);
 		status.setVisible(bankSeen);
@@ -737,24 +1055,21 @@ public class RebuildPanel extends PluginPanel
 
 		diff(plan);
 		updateStatus(plan);
-		switch (selectedTab)
+		if (selectedTab == SELL_TAB)
 		{
-			case 1:
-				// What you end up wearing, and what that needs buying.
-				addKeeps(plan);
-				addBuys(plan);
-				break;
-			case 2:
-				// Everything you can act on: what goes, and your own changes.
-				addChanges(plan);
-				addSwaps(plan);
-				addSales(plan);
-				addExcluded(plan);
-				break;
-			default:
-				addSummary(plan);
-				addEarnBack(plan);
-				break;
+			// Everything you can act on: what goes, and your own changes.
+			addChanges(plan);
+			addSwaps(plan);
+			addSales(plan);
+			addExcluded(plan);
+		}
+		else
+		{
+			// The outcome: the verdict, where the gp comes back, and the kit you end up with.
+			addSummary(plan);
+			addEarnBack(plan);
+			addKeeps(plan);
+			addBuys(plan);
 		}
 		refresh();
 	}
@@ -782,7 +1097,7 @@ public class RebuildPanel extends PluginPanel
 		status.setText(text + "  \u00B7  " + gp(Math.min(plan.getRaised(), plan.getNeeded())) + " / " + gp(plan.getNeeded()));
 		status.setToolTipText("Raised by the sales on the Sell tab, out of what is still needed after your coins");
 		status.setForeground(colour);
-		tabButtons[2].setText(plan.getSwaps().isEmpty() && plan.getSales().isEmpty() ? "Sell"
+		tabButtons[SELL_TAB].setText(plan.getSwaps().isEmpty() && plan.getSales().isEmpty() ? "Sell"
 			: "Sell (" + (plan.getSwaps().size() + (int) plan.getSales().stream().filter(Plan.Sale::isNeeded).count()) + ")");
 	}
 	// ---- Sections --------------------------------------------------------
@@ -968,15 +1283,21 @@ public class RebuildPanel extends PluginPanel
 				optional += sale.getProceeds();
 			}
 		}
-		if (needed.isEmpty() && optional == 0 && plan.getExcluded().isEmpty())
+		if (needed.isEmpty() && optional == 0 && plan.getExcluded().isEmpty() && plan.getAddable().isEmpty())
 		{
 			return;
 		}
 
 		final JPanel card = card("Sell from your bank", GOOD);
+		// Anything else of value the plan was leaving alone, for the player to add.
+		if (!plan.getAddable().isEmpty())
+		{
+			card.add(left(addSaleBox(plan)));
+			card.add(Box.createVerticalStrut(6));
+		}
 		for (Plan.Sale sale : needed)
 		{
-			final JPanel row = left(new JPanel(new BorderLayout(6, 0)));
+			final JPanel row = anchor("sale:" + sale.getItemId(), left(new JPanel(new BorderLayout(6, 0))));
 			row.setBackground(CARD);
 			row.setBorder(new EmptyBorder(3, 0, 3, 0));
 			row.add(icon(sale.getItemId(), sale.getQuantity()), BorderLayout.WEST);
@@ -1012,7 +1333,7 @@ public class RebuildPanel extends PluginPanel
 		// What the player chose to keep stays visible here, crossed out.
 		for (Plan.Excluded item : plan.getExcluded())
 		{
-			final JPanel row = left(new JPanel(new BorderLayout(6, 0)));
+			final JPanel row = anchor("kept:" + item.getItemId(), left(new JPanel(new BorderLayout(6, 0))));
 			row.setBackground(CARD);
 			row.setBorder(new EmptyBorder(3, 0, 3, 0));
 			row.add(icon(item.getItemId(), 1), BorderLayout.WEST);
@@ -1026,6 +1347,61 @@ public class RebuildPanel extends PluginPanel
 			+ "press Enter." + (optional > 0 ? " Another " + gp(optional) + " of spare items is not needed." : ""),
 			INNER - 20, MUTED));
 		addCard(card);
+	}
+
+	/** A drop-down of everything the plan is keeping, with pictures, to add to the sell list. */
+	private JComboBox<Plan.Choice> addSaleBox(Plan plan)
+	{
+		final Plan.Choice prompt = new Plan.Choice(-1, -1, "+ Sell something else…", true, 0);
+		final JComboBox<Plan.Choice> add = new JComboBox<>();
+		add.addItem(prompt);
+		for (Plan.Choice choice : plan.getAddable())
+		{
+			add.addItem(choice);
+		}
+		final Map<Integer, javax.swing.ImageIcon> icons = new HashMap<>();
+		add.setRenderer(new javax.swing.DefaultListCellRenderer()
+		{
+			@Override
+			public java.awt.Component getListCellRendererComponent(javax.swing.JList<?> list, Object value, int index,
+																   boolean selected, boolean focused)
+			{
+				super.getListCellRendererComponent(list, value, index, selected, focused);
+				final Plan.Choice choice = (Plan.Choice) value;
+				setFont(FontManager.getRunescapeSmallFont());
+				setBorder(new EmptyBorder(2, 4, 2, 4));
+				if (choice == null || choice.getId() < 0)
+				{
+					setText(prompt.getName());
+					setIcon(null);
+					setForeground(ColorScheme.BRAND_ORANGE);
+					return this;
+				}
+				setText(choice.getName() + "  ·  " + gp(choice.getPrice()));
+				setIcon(icons.computeIfAbsent(choice.getIconId(), id ->
+				{
+					final java.awt.image.BufferedImage image = itemManager.getImage(id);
+					if (image instanceof net.runelite.client.util.AsyncBufferedImage)
+					{
+						((net.runelite.client.util.AsyncBufferedImage) image).onLoaded(list::repaint);
+					}
+					return new javax.swing.ImageIcon(image);
+				}));
+				return this;
+			}
+		});
+		add.setPrototypeDisplayValue(prompt);
+		add.setMaximumRowCount(10);
+		add.setToolTipText("Add an item the plan is keeping - a kit piece or your current weapon - to the sell list");
+		add.addActionListener(e ->
+		{
+			final Plan.Choice choice = (Plan.Choice) add.getSelectedItem();
+			if (choice != null && choice.getId() >= 0)
+			{
+				actions.addSale(choice.getId());
+			}
+		});
+		return add;
 	}
 
 	private void addSwaps(Plan plan)
@@ -1048,7 +1424,7 @@ public class RebuildPanel extends PluginPanel
 						+ "</span>" : " &middot; no damage lost"), 0, ColorScheme.LIGHT_GRAY_COLOR));
 			}
 
-			final JPanel row = left(new JPanel(new BorderLayout(6, 0)));
+			final JPanel row = anchor("swap:" + swap.getSellId(), left(new JPanel(new BorderLayout(6, 0))));
 			row.setBackground(CARD);
 			row.setBorder(new EmptyBorder(2, 0, 4, 0));
 
@@ -1060,19 +1436,71 @@ public class RebuildPanel extends PluginPanel
 			final JLabel arrow = new JLabel("\u2192");
 			arrow.setForeground(MUTED);
 			pictures.add(arrow);
-			pictures.add(icon(swap.getUseId(), 1));
+			final JLabel useIcon = icon(swap.getUseId(), 1);
+			pictures.add(useIcon);
+			if (!swap.getChoices().isEmpty())
+			{
+				final JLabel more = new JLabel(" ▾");
+				more.setForeground(ColorScheme.BRAND_ORANGE);
+				pictures.add(more);
+				for (JComponent c : new JComponent[]{useIcon, more})
+				{
+					c.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+					c.setToolTipText("Click to choose what to use instead of " + swap.getSell());
+					c.addMouseListener(new MouseAdapter()
+					{
+						@Override
+						public void mousePressed(MouseEvent e)
+						{
+							replacementMenu(swap).show(useIcon, 0, useIcon.getHeight());
+						}
+					});
+				}
+			}
 			top.add(pictures, BorderLayout.WEST);
 			top.add(button("\u2715", "Keep " + swap.getSell() + " - the plan will look elsewhere", BAD,
 				() -> actions.exclude(swap.getSellId())), BorderLayout.EAST);
 			row.add(top, BorderLayout.NORTH);
 
 			row.add(text("<span style='color:white'>Sell " + esc(swap.getSell()) + "</span><br>"
-				+ "Use " + esc(swap.getUse()) + (swap.isUseOwned() || swap.getUseId() < 0 ? "" : " (buy it)") + "<br>"
+				+ "Use " + esc(swap.getUse()) + (swap.isUseOwned() || swap.getUseId() < 0 ? "" : " (buy it)")
+				+ (swap.isCustom() ? " <span style='color:" + hex(WARN) + "'>&middot; your pick</span>" : "") + "<br>"
 				+ "<span style='color:" + hex(GOOD) + "'>+" + gp(swap.getFreed()) + "</span>", 0, MUTED),
 				BorderLayout.CENTER);
 			card.add(row);
 		}
 		addCard(card);
+	}
+
+	/** The list of things a sold piece can be replaced with, best first. */
+	private javax.swing.JPopupMenu replacementMenu(Plan.Swap swap)
+	{
+		final javax.swing.JPopupMenu menu = new javax.swing.JPopupMenu();
+		for (Plan.Choice choice : swap.getChoices())
+		{
+			final boolean current = choice.getName().equals(swap.getUse());
+			final javax.swing.JMenuItem item = new javax.swing.JMenuItem((current ? "✓ " : "") + choice.getName()
+				+ "  ·  " + (choice.isOwned() ? "owned" : gp(choice.getPrice())));
+			final java.awt.image.BufferedImage image = itemManager.getImage(choice.getIconId());
+			item.setIcon(new javax.swing.ImageIcon(image));
+			if (image instanceof net.runelite.client.util.AsyncBufferedImage)
+			{
+				((net.runelite.client.util.AsyncBufferedImage) image).onLoaded(item::repaint);
+			}
+			item.setFont(FontManager.getRunescapeSmallFont());
+			item.setForeground(current ? Color.WHITE : choice.isOwned() ? GOOD : ColorScheme.LIGHT_GRAY_COLOR);
+			item.addActionListener(e -> actions.setReplacement(swap.getSellId(), choice.getId()));
+			menu.add(item);
+		}
+		if (swap.isCustom())
+		{
+			menu.addSeparator();
+			final javax.swing.JMenuItem reset = new javax.swing.JMenuItem("↺ Back to the suggested swap");
+			reset.setFont(FontManager.getRunescapeSmallFont());
+			reset.addActionListener(e -> actions.clearReplacement(swap.getSellId()));
+			menu.add(reset);
+		}
+		return menu;
 	}
 
 	/** A way to undo everything at once, shown only after the player has changed something. */

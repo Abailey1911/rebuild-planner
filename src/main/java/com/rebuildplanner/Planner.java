@@ -185,18 +185,20 @@ public class Planner
 			{
 				final long price = items.price(option.ownedId);
 				final boolean protectedItem = excluded.contains(option.ownedId)
-					|| mainKept.contains(option.ownedId) || !items.tradeable(option.ownedId);
+					|| mainKept.contains(option.ownedId) || !items.tradeable(option.ownedId)
+					|| chosenIds.contains(option.listId);
 				if (protectedItem || price <= tier)
 				{
 					return 0;
 				}
 			}
-			if (!allowBuy || goalIds.contains(option.listId) || !items.tradeable(option.listId))
+			final long price = items.buyPrice(option.listId);
+			if (!allowBuy || goalIds.contains(option.listId) || price <= 0 || putUpForSale(option.listId))
 			{
 				return -1;
 			}
-			final long price = items.price(option.listId);
-			return price > 0 && price <= buyCap(slot) ? price : -1;
+			// A replacement the player picked is allowed whatever it costs.
+			return price > 0 && (price <= buyCap(slot) || chosenIds.contains(option.listId)) ? price : -1;
 		}
 	}
 
@@ -211,6 +213,11 @@ public class Planner
 	private Map<Integer, Long> owned;
 	private Set<Integer> goalIds;
 	private Set<Integer> excluded;
+	/** Replacements the player picked: sold item id to list item id. */
+	private Map<Integer, Integer> replace = Collections.emptyMap();
+	private Set<Integer> chosenIds = Collections.emptySet();
+	/** Items the player added to the sell list themselves. */
+	private Set<Integer> forceSell = Collections.emptySet();
 	private final Set<Integer> sold = new HashSet<>();
 	private final Set<Integer> mainKept = new HashSet<>();
 
@@ -235,15 +242,37 @@ public class Planner
 		return name != null && SUPPLY.matcher(name.toLowerCase(Locale.ROOT)).find();
 	}
 
+	/** True for an item the player put up for sale, in any of its forms: never bought back. */
+	private boolean putUpForSale(int itemId)
+	{
+		if (forceSell.isEmpty())
+		{
+			return false;
+		}
+		if (forceSell.contains(itemId))
+		{
+			return true;
+		}
+		for (int variant : variants.getOrDefault(String.valueOf(itemId), Collections.emptyList()))
+		{
+			if (forceSell.contains(variant))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** The form of an item the kit may use; one the player put up for sale does not count. */
 	private int ownedForm(int itemId)
 	{
-		if (owned.getOrDefault(itemId, 0L) > 0)
+		if (owned.getOrDefault(itemId, 0L) > 0 && !forceSell.contains(itemId))
 		{
 			return itemId;
 		}
 		for (int variant : variants.getOrDefault(String.valueOf(itemId), Collections.emptyList()))
 		{
-			if (owned.getOrDefault(variant, 0L) > 0)
+			if (owned.getOrDefault(variant, 0L) > 0 && !forceSell.contains(variant))
 			{
 				return variant;
 			}
@@ -402,10 +431,16 @@ public class Planner
 					Option pick = loadout.get(slot);
 					double pickScore = dps(role, loadout, useVoid);
 					long pickCost = pick == null ? 0 : rules.cost(slot, pick);
+					// Where the piece the player had is being sold and they picked
+					// what replaces it, nothing else is considered.
+					final Option was = rules.role != null && rules.role.start != null
+						? rules.role.start.get(slot) : null;
+					final Integer chosen = was != null && was.ownedId >= 0 && rules.cost(slot, was) != 0
+						? replace.get(was.ownedId) : null;
 					for (Option option : entry.getValue())
 					{
 						final long cost = rules.cost(slot, option);
-						if (cost < 0 || isVoidPiece(option.listId)
+						if (cost < 0 || isVoidPiece(option.listId) || (chosen != null && option.listId != chosen)
 							|| ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
 						{
 							continue;
@@ -504,9 +539,9 @@ public class Planner
 		Option cheapest = null;
 		for (Option option : options)
 		{
-			final long price = items.price(option.listId);
-			if (price <= 0 || !items.tradeable(option.listId) || goalIds.contains(option.listId)
-				|| isVoidPiece(option.listId) || ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
+			final long price = items.buyPrice(option.listId);
+			if (price <= 0 || goalIds.contains(option.listId)
+				|| isVoidPiece(option.listId) || putUpForSale(option.listId) || ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
 			{
 				continue;
 			}
@@ -514,7 +549,7 @@ public class Planner
 			{
 				best = option;
 			}
-			if (cheapest == null || price < items.price(cheapest.listId))
+			if (cheapest == null || price < items.buyPrice(cheapest.listId))
 			{
 				cheapest = option;
 			}
@@ -536,6 +571,11 @@ public class Planner
 		this.excluded = overrides == null ? Collections.emptySet() : overrides.getExcluded();
 		final Map<Integer, Long> customQty = overrides == null
 			? Collections.emptyMap() : overrides.getSellQuantity();
+		this.replace = overrides == null || overrides.getReplacement() == null
+			? Collections.emptyMap() : overrides.getReplacement();
+		this.chosenIds = new HashSet<>(replace.values());
+		this.forceSell = overrides == null || overrides.getForceSell() == null
+			? Collections.emptySet() : overrides.getForceSell();
 		sold.clear();
 		mainKept.clear();
 
@@ -625,7 +665,7 @@ public class Planner
 			if (fill != null)
 			{
 				final long qty = "AMMO".equals(slot) && isAmmunition(fill) ? ammoReserve(fill.listId) : 1;
-				final long cost = items.price(fill.listId) * qty;
+				final long cost = items.buyPrice(fill.listId) * qty;
 				plan.getBuys().add(new Plan.Buy(fill.listId, main.label, slot, fill.name, qty, cost));
 				buyCost += cost;
 				main.current.put(slot, new Option(fill.listId, fill.rank, fill.name, -1));
@@ -661,7 +701,7 @@ public class Planner
 					plan.getGoalPrice(), -1);
 				if (fill != null)
 				{
-					final long cost = items.price(fill.listId);
+					final long cost = items.buyPrice(fill.listId);
 					plan.getBuys().add(new Plan.Buy(fill.listId, role.label, "WEAPON", fill.name, 1, cost));
 					buyCost += cost;
 					final Option bought = new Option(fill.listId, fill.rank, fill.name, -1);
@@ -757,10 +797,20 @@ public class Planner
 
 			final long kitKeep = keepQty.getOrDefault(id, 0L);
 			final Long custom = customQty.get(id);
+			final boolean forced = forceSell.contains(id);
 			final long sell;
 			if (custom != null)
 			{
 				sell = Math.max(0, Math.min(held - kitKeep, custom));
+			}
+			else if (forced)
+			{
+				// The player put this up themselves: all of it, however little it is worth.
+				sell = held - kitKeep;
+				if (sell <= 0)
+				{
+					continue;
+				}
 			}
 			else
 			{
@@ -778,7 +828,7 @@ public class Planner
 					continue;
 				}
 			}
-			pool.add(new Plan.Sale(id, name, sell, held - sell, held, sell * net(price), true, custom != null));
+			pool.add(new Plan.Sale(id, name, sell, held - sell, held, sell * net(price), true, custom != null || forced));
 		}
 		// Ordered by what the whole stack is worth, so changing an amount does not
 		// move the row out from under the player's cursor.
@@ -898,9 +948,11 @@ public class Planner
 				{
 					continue;
 				}
+				final Integer chosen = replace.get(pick.ownedId);
 				for (Option alt : entry.getValue())
 				{
 					if (alt == pick || alt.listId == pick.ownedId || isVoidPiece(alt.listId)
+						|| (chosen != null && alt.listId != chosen)
 						|| ("AMMO".equals(slot) && !DpsModel.ammoFits(items, goal.getId(), alt.listId)))
 					{
 						continue;
@@ -915,15 +967,15 @@ public class Planner
 					}
 					else
 					{
-						final long altPrice = items.price(alt.listId);
-						if (altPrice <= 0 || buyAny.cost(alt) < 0 || altPrice > price / 2)
+						final long altPrice = items.buyPrice(alt.listId);
+						if (altPrice <= 0 || buyAny.cost(alt) < 0 || (chosen == null && altPrice > price / 2))
 						{
 							continue;
 						}
 						cost = altPrice;
 					}
 					final long freed = net(price) - cost;
-					if (freed < MIN_SWAP_VALUE)
+					if (chosen == null ? freed < MIN_SWAP_VALUE : freed <= 0)
 					{
 						continue;
 					}
@@ -933,7 +985,8 @@ public class Planner
 					main.current.put(slot, pick);
 
 					final double total = (main.startDps - s) / main.startDps * 100;
-					if (total > settings.getMaxDpsLossPct())
+					// The player's own pick stands even past the damage cap.
+					if (chosen == null && total > settings.getMaxDpsLossPct())
 					{
 						continue;
 					}
@@ -1001,7 +1054,7 @@ public class Planner
 							: "BODY".equals(slot) ? ELITE_VOID_TOP : "LEGS".equals(slot) ? ELITE_VOID_ROBE : VOID_GLOVES;
 						plan.getSwaps().add(new Plan.Swap(pick.ownedId, ownedForm(voidPiece) >= 0 ? ownedForm(voidPiece) : voidPiece,
 							main.label, items.name(pick.ownedId), items.name(voidPiece), true,
-							net(items.price(pick.ownedId))));
+							net(items.price(pick.ownedId)), Collections.emptyList(), false));
 					}
 				}
 				useVoid = true;
@@ -1012,7 +1065,8 @@ public class Planner
 				final Option pick = main.current.get(bestSlot);
 				sold.add(pick.ownedId);
 				plan.getSwaps().add(new Plan.Swap(pick.ownedId, bestAltOwned ? bestAlt.ownedId : bestAlt.listId,
-					main.label, items.name(pick.ownedId), bestAlt.name, bestAltOwned, bestFreed));
+					main.label, items.name(pick.ownedId), bestAlt.name, bestAltOwned, bestFreed,
+					choices(main, bestSlot, pick.ownedId, goal.getId()), replace.containsKey(pick.ownedId)));
 				// A bought replacement is a new item, not the one just sold.
 				main.current.put(bestSlot, bestAltOwned ? bestAlt
 					: new Option(bestAlt.listId, bestAlt.rank, bestAlt.name, -1));
@@ -1089,6 +1143,28 @@ public class Planner
 			plan.setGainPct((rebuilt - today) / today * 100);
 			plan.setWorthIt(plan.getGainPct() >= settings.getMinGainPct());
 		}
+
+		// What else the player could put up: anything of value the plan leaves alone.
+		final Set<Integer> selling = new HashSet<>(sold);
+		for (Plan.Sale sale : plan.getSales())
+		{
+			if (sale.isNeeded())
+			{
+				selling.add(sale.getItemId());
+			}
+		}
+		for (Map.Entry<Integer, Long> entry : owned.entrySet())
+		{
+			final int id = entry.getKey();
+			final long value = items.price(id) * entry.getValue();
+			if (id == COINS || id == PLATINUM_TOKEN || goalIds.contains(id) || selling.contains(id)
+				|| excluded.contains(id) || !items.tradeable(id) || value < settings.getMinStackValue())
+			{
+				continue;
+			}
+			plan.getAddable().add(new Plan.Choice(id, id, items.name(id), true, value));
+		}
+		plan.getAddable().sort(Comparator.comparingLong(Plan.Choice::getPrice).reversed());
 
 		final double bestDps = dps(main, bestPossible(main), false);
 		plan.setRaised(raised);
@@ -1188,7 +1264,9 @@ public class Planner
 			plan.getSwaps().add(new Plan.Swap(gone.ownedId,
 				use == null ? -1 : (useOwned ? use.ownedId : use.listId), role.label,
 				items.name(gone.ownedId), use == null ? "nothing" : use.name, useOwned,
-				net(items.price(gone.ownedId)) - cost));
+				net(items.price(gone.ownedId)) - cost,
+				slot == null ? Collections.emptyList() : choices(role, slot, gone.ownedId, weaponId(role, role.current)),
+				replace.containsKey(gone.ownedId)));
 		}
 		// Buys that do not replace a sold piece.
 		for (Map.Entry<String, Option> entry : role.current.entrySet())
@@ -1203,6 +1281,36 @@ public class Planner
 				rules.cost(entry.getKey(), use) * qty));
 		}
 		return gross;
+	}
+
+	/**
+	 * What a sold kit piece could be replaced with, in the wiki's order: pieces
+	 * the player holds, and cheaper ones they could buy.
+	 */
+	private List<Plan.Choice> choices(Role role, String slot, int soldId, int weaponId)
+	{
+		final List<Plan.Choice> out = new ArrayList<>();
+		final long soldPrice = items.price(soldId);
+		for (Option option : role.slots.getOrDefault(slot, Collections.emptyList()))
+		{
+			if (option.listId == soldId || option.ownedId == soldId || goalIds.contains(option.listId)
+				|| isVoidPiece(option.listId)
+				|| ("AMMO".equals(slot) && !DpsModel.ammoFits(items, weaponId, option.listId)))
+			{
+				continue;
+			}
+			final boolean held = option.ownedId >= 0
+				&& (!sold.contains(option.ownedId) || chosenIds.contains(option.listId));
+			final long price = items.buyPrice(option.listId);
+			if (!held && (price <= 0 || price >= soldPrice
+				|| putUpForSale(option.listId)))
+			{
+				continue;
+			}
+			out.add(new Plan.Choice(option.listId, held ? option.ownedId : option.listId, option.name, held,
+				held ? 0 : price));
+		}
+		return out;
 	}
 
 	/** The top of every list, regardless of ownership: the damage ceiling. */

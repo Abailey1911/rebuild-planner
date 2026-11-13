@@ -21,8 +21,14 @@ public class Overrides
 	/** Exact amount to sell, set by the player, per item. */
 	private Map<Integer, Long> sellQuantity = new HashMap<>();
 
+	/** For a kit piece being sold, the replacement the player picked: sold item id to list item id. */
+	private Map<Integer, Integer> replacement = new HashMap<>();
+
+	/** Items the player added to the sell list themselves; the kit goes without them. */
+	private Set<Integer> forceSell = new HashSet<>();
+
 	public boolean isEmpty()
 	{
-		return excluded.isEmpty() && sellQuantity.isEmpty();
+		return forceSell.isEmpty() &&excluded.isEmpty() && sellQuantity.isEmpty() && replacement.isEmpty();
 	}
 }

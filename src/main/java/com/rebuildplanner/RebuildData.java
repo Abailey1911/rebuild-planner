@@ -110,6 +110,22 @@ public final class RebuildData
 	private static class VariantDocument
 	{
 		private Map<String, List<Integer>> variants;
+		private Map<String, List<Component>> components;
+	}
+
+	/** One ingredient of an item that cannot be bought whole, like the jaw in a Neitiznot faceguard. */
+	@Data
+	public static class Component
+	{
+		private int id;
+		private int qty;
+	}
+
+	/** Item id to what it is made from, for items the Grand Exchange does not sell. */
+	public static Map<String, List<Component>> loadComponents(Gson gson)
+	{
+		final VariantDocument doc = read(gson, "variants.json", VariantDocument.class);
+		return doc == null || doc.getComponents() == null ? Collections.emptyMap() : doc.getComponents();
 	}
 
 	private RebuildData()
