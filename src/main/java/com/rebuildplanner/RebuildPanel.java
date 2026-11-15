@@ -110,6 +110,10 @@ public class RebuildPanel extends PluginPanel
 
 	private List<Plan> plans = new ArrayList<>();
 	private boolean bankSeen;
+	/** True while the plans, not the logged-out card, are on screen. */
+	private boolean showingPlans;
+	/** A newer plan arrived while the panel was closed; it is drawn when opened. */
+	private boolean stale;
 	/** The plan as it stood just before the player's last change, to show what moved. */
 	private Map<Integer, Long> before;
 	private Map<Integer, String> beforeNames;
@@ -696,6 +700,7 @@ public class RebuildPanel extends PluginPanel
 
 	public void showLoggedOut()
 	{
+		showingPlans = false;
 		content.removeAll();
 		tabRow.setVisible(false);
 		status.setVisible(false);
@@ -722,8 +727,17 @@ public class RebuildPanel extends PluginPanel
 		addCard(card);
 	}
 
-	public void showPlans(RebuildData.Goal goal, List<Plan> plans, boolean bankSeen, boolean hasOverrides)
+	public void showPlans(RebuildData.Goal goal, List<Plan> plans, boolean bankSeen, boolean hasOverrides,
+		boolean passive)
 	{
+		// The game changed something but the plan came out the same: redrawing would
+		// only make the panel flash and lose its place.
+		if (passive && showingPlans && bankSeen == this.bankSeen && hasOverrides == this.hasOverrides
+			&& goal == selectedGoal() && plans.equals(this.plans))
+		{
+			return;
+		}
+		showingPlans = goal == selectedGoal();
 		this.hasOverrides = hasOverrides;
 		// Jump to the top the moment the bank is first read, not wherever the
 		// instructions happened to leave the scroll position.
@@ -737,7 +751,26 @@ public class RebuildPanel extends PluginPanel
 		}
 		this.plans = plans;
 		this.bankSeen = bankSeen;
+		// Building the page draws an item picture per row, which the game has to
+		// render. With the panel closed nobody would see it: wait until it is opened.
+		if (!isShowing())
+		{
+			stale = true;
+			return;
+		}
+		stale = false;
 		render();
+	}
+
+	@Override
+	public void onActivate()
+	{
+		super.onActivate();
+		if (stale)
+		{
+			stale = false;
+			render();
+		}
 	}
 
 	private void refresh()

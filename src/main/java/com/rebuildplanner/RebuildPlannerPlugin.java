@@ -9,8 +9,11 @@ import com.google.gson.Gson;
 import com.google.inject.Provides;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ScheduledExecutorService;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
@@ -68,6 +71,10 @@ public class RebuildPlannerPlugin extends Plugin
 	@Inject
 	private ConfigManager configManager;
 
+	/** RuneLite's background thread; planning runs here so it never holds up the game. */
+	@Inject
+	private ScheduledExecutorService executor;
+
 	/** The player's own ✕s and amounts; saved so they survive a restart. */
 	private Overrides overrides = new Overrides();
 	private static final String OVERRIDES_KEY = "overrides";
@@ -75,6 +82,21 @@ public class RebuildPlannerPlugin extends Plugin
 
 	private List<RebuildData.Goal> goals;
 	private Planner planner;
+	/** Item facts copied on the client thread for the background planner. */
+	private ItemFacts facts;
+	/** Every item the bundled data can ask about, loaded into {@link #facts} up front. */
+	private Set<Integer> dataItems = new HashSet<>();
+	/** What the last plan was built from; an identical replan is skipped. */
+	private Map<Integer, Long> lastOwned;
+	private DpsModel.Levels lastLevels;
+	private Planner.Settings lastSettings;
+	private RebuildData.Goal lastGoal;
+	/** Bumped for every plan requested, so a stale background result is dropped. */
+	private volatile long planSequence;
+	/** Ticks since potion storage was last read. */
+	private int potionAge = Integer.MAX_VALUE;
+	/** Bank changes re-read potion storage at most this often (about 6s). */
+	private static final int POTION_READ_TICKS = 10;
 	private RebuildPanel panel;
 	private NavigationButton navButton;
 
@@ -82,6 +104,14 @@ public class RebuildPlannerPlugin extends Plugin
 	private boolean dirty;
 	/** Set when potion storage may have changed; it is re-read on the next tick. */
 	private boolean potionsDirty;
+	/** A replan is owed; it runs once the holdings have stopped changing. */
+	private boolean pending;
+	private int quietTicks;
+	private int waitedTicks;
+	/** Ticks with no change before replanning (about 1.2s). */
+	private static final int QUIET_TICKS = 2;
+	/** Replan anyway after this many ticks of constant change (about 30s). */
+	private static final int MAX_WAIT_TICKS = 50;
 
 	@Override
 	protected void startUp()
@@ -89,7 +119,9 @@ public class RebuildPlannerPlugin extends Plugin
 		goals = RebuildData.loadGoals(gson);
 		final Map<String, List<Integer>> variants = RebuildData.loadVariants(gson);
 		components = RebuildData.loadComponents(gson);
-		planner = new Planner(new ClientItemInfo(), variants);
+		facts = new ItemFacts(new ClientItemInfo(), components);
+		planner = new Planner(facts, variants);
+		dataItems = dataItems(goals, variants, components);
 
 		overrides = loadOverrides();
 		saved = loadSaved();
@@ -128,7 +160,58 @@ public class RebuildPlannerPlugin extends Plugin
 		clientToolbar.removeNavigation(navButton);
 		navButton = null;
 		panel = null;
+		planSequence++;
+		lastOwned = null;
 		holdings.clear();
+	}
+
+	private static Set<Integer> dataItems(List<RebuildData.Goal> goals, Map<String, List<Integer>> variants,
+		Map<String, List<RebuildData.Component>> components)
+	{
+		final Set<Integer> ids = new HashSet<>();
+		ids.add(Planner.COINS);
+		ids.add(Planner.PLATINUM_TOKEN);
+		for (RebuildData.Goal goal : goals)
+		{
+			ids.add(goal.getId());
+			ids.add(goal.getBuyId());
+			for (RebuildData.Method method : goal.getMethods())
+			{
+				for (RebuildData.Role role : method.getRoles())
+				{
+					for (RebuildData.Slot slot : role.getSlots())
+					{
+						ids.addAll(slot.getIds());
+					}
+				}
+			}
+		}
+		for (Map.Entry<String, List<Integer>> e : variants.entrySet())
+		{
+			addId(ids, e.getKey());
+			ids.addAll(e.getValue());
+		}
+		for (Map.Entry<String, List<RebuildData.Component>> e : components.entrySet())
+		{
+			addId(ids, e.getKey());
+			for (RebuildData.Component part : e.getValue())
+			{
+				ids.add(part.getId());
+			}
+		}
+		return ids;
+	}
+
+	private static void addId(Set<Integer> ids, String key)
+	{
+		try
+		{
+			ids.add(Integer.parseInt(key));
+		}
+		catch (NumberFormatException ignored)
+		{
+			// Not an item id; nothing to load.
+		}
 	}
 
 	private static BufferedImage icon()
@@ -159,7 +242,10 @@ public class RebuildPlannerPlugin extends Plugin
 		{
 			holdings.refresh(id);
 			dirty = true;
-			if (id == InventoryID.BANK)
+			// Reading potion storage runs a few hundred client scripts. Depositing and
+			// withdrawing change the bank constantly, so read it at most every few
+			// seconds; the potion storage varps flag real changes on their own.
+			if (id == InventoryID.BANK && potionAge >= POTION_READ_TICKS)
 			{
 				potionsDirty = true;
 			}
@@ -189,9 +275,14 @@ public class RebuildPlannerPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
+		if (potionAge < Integer.MAX_VALUE)
+		{
+			potionAge++;
+		}
 		if (potionsDirty)
 		{
 			potionsDirty = false;
+			potionAge = 0;
 			try
 			{
 				holdings.refreshPotionStore();
@@ -202,10 +293,23 @@ public class RebuildPlannerPlugin extends Plugin
 			}
 			dirty = true;
 		}
+		// Making potions or cooking changes the inventory every tick or two. Replanning
+		// on each change redrew the panel constantly, so wait for the changes to stop.
 		if (dirty)
 		{
 			dirty = false;
-			recompute();
+			pending = true;
+			quietTicks = 0;
+		}
+		else if (pending)
+		{
+			quietTicks++;
+		}
+		if (pending && (quietTicks >= QUIET_TICKS || ++waitedTicks >= MAX_WAIT_TICKS))
+		{
+			pending = false;
+			waitedTicks = 0;
+			recompute(true);
 		}
 	}
 
@@ -220,10 +324,19 @@ public class RebuildPlannerPlugin extends Plugin
 	/** Called from the panel when the goal or method selection changes. */
 	private void requestPlan()
 	{
-		clientThread.invokeLater(this::recompute);
+		clientThread.invokeLater(() -> recompute(false));
 	}
 
 	private void recompute()
+	{
+		recompute(false);
+	}
+
+	/**
+	 * @param passive true when the game changed something on its own; the panel then
+	 *                leaves the screen alone unless the plan actually came out different
+	 */
+	private void recompute(boolean passive)
 	{
 		final RebuildPanel target = panel;
 		if (target == null || goals == null || goals.isEmpty())
@@ -232,6 +345,7 @@ public class RebuildPlannerPlugin extends Plugin
 		}
 		if (client.getGameState() != GameState.LOGGED_IN)
 		{
+			lastOwned = null;
 			SwingUtilities.invokeLater(target::showLoggedOut);
 			return;
 		}
@@ -243,31 +357,74 @@ public class RebuildPlannerPlugin extends Plugin
 		}
 
 		final Map<Integer, Long> owned = holdings.totals();
-		final long coins = owned.getOrDefault(Planner.COINS, 0L)
-			+ owned.getOrDefault(Planner.PLATINUM_TOKEN, 0L) * 1000L;
 		final DpsModel.Levels levels = new DpsModel.Levels(
 			client.getRealSkillLevel(Skill.ATTACK), client.getRealSkillLevel(Skill.STRENGTH),
 			client.getRealSkillLevel(Skill.RANGED), client.getRealSkillLevel(Skill.MAGIC));
 		final Planner.Settings settings = new Planner.Settings(
 			config.minStackValue(), config.supplyReserve(), config.maxDpsLoss(), config.maxSwitchLoss(),
 			config.minGain());
-
-		final List<Plan> plans = new ArrayList<>();
-		for (RebuildData.Method method : goal.getMethods())
+		// Swapping gear moves items between the inventory and worn slots, and opening
+		// the bank re-reads it, without changing what the player owns. Planning again
+		// would only give the same answer, so don't.
+		if (passive && goal == lastGoal && owned.equals(lastOwned) && levels.equals(lastLevels)
+			&& settings.equals(lastSettings))
 		{
-			try
-			{
-				plans.add(planner.plan(goal, method, owned, coins, levels, settings, overrides));
-			}
-			catch (RuntimeException e)
-			{
-				log.warn("Could not plan {} via {}", goal.getName(), method.getName(), e);
-			}
+			return;
 		}
+		lastGoal = goal;
+		lastOwned = owned;
+		lastLevels = levels;
+		lastSettings = settings;
 
+		// Everything the planner reads from the client is copied here, on the client
+		// thread; the planning itself runs in the background.
+		facts.load(dataItems);
+		facts.load(owned.keySet());
+		final long coins = owned.getOrDefault(Planner.COINS, 0L)
+			+ owned.getOrDefault(Planner.PLATINUM_TOKEN, 0L) * 1000L;
+		final Overrides choices = copy(overrides);
 		final boolean bankSeen = holdings.isBankSeen();
-		final boolean changed = !overrides.isEmpty();
-		SwingUtilities.invokeLater(() -> target.showPlans(goal, plans, bankSeen, changed));
+		final boolean changed = !choices.isEmpty();
+		final long sequence = ++planSequence;
+
+		executor.execute(() ->
+		{
+			if (sequence != planSequence)
+			{
+				return;
+			}
+			final List<Plan> plans = new ArrayList<>();
+			synchronized (planner)
+			{
+				for (RebuildData.Method method : goal.getMethods())
+				{
+					try
+					{
+						plans.add(planner.plan(goal, method, owned, coins, levels, settings, choices));
+					}
+					catch (RuntimeException e)
+					{
+						log.warn("Could not plan {} via {}", goal.getName(), method.getName(), e);
+					}
+				}
+			}
+			final Set<Integer> missed = facts.takeMissed();
+			if (sequence != planSequence)
+			{
+				return;
+			}
+			SwingUtilities.invokeLater(() -> target.showPlans(goal, plans, bankSeen, changed, passive));
+			if (!missed.isEmpty())
+			{
+				// Something outside the bundled data and holdings came up: read it and plan again.
+				clientThread.invokeLater(() ->
+				{
+					facts.load(missed);
+					lastOwned = null;
+					recompute(true);
+				});
+			}
+		});
 	}
 
 	// ---- Saved plans ---------------------------------------------------------
