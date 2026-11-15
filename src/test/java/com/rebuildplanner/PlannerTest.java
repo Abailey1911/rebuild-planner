@@ -204,14 +204,14 @@ public class PlannerTest
 	@Test
 	public void bundledDataLoads()
 	{
-		assertEquals(4, goals.size());
+		assertEquals("Four megarares and the Avernic treads", 5, goals.size());
 		for (RebuildData.Goal goal : goals)
 		{
 			assertFalse(goal.getMethods().isEmpty());
 			for (RebuildData.Method method : goal.getMethods())
 			{
 				assertNotNull(method.getTarget());
-				assertTrue(method.getRoles().stream().anyMatch(RebuildData.Role::isMain));
+				assertEquals(goal.isMegarare(), method.getRoles().stream().anyMatch(RebuildData.Role::isMain));
 				for (RebuildData.Role role : method.getRoles())
 				{
 					assertTrue("Switches need their own target", role.isMain() || role.getTarget() != null);
@@ -222,6 +222,62 @@ public class PlannerTest
 				}
 			}
 		}
+	}
+
+	/** The treads: a damage check per style, the best gear kept, and the boots they replace up for sale. */
+	@Test
+	public void treadsAreCheckedInEachStyleAndPaidForAroundTheKit()
+	{
+		final RebuildData.Goal treads = goal("Avernic treads");
+		assertTrue(treads.isUpgrade());
+		final RebuildData.Method check = treads.getMethods().get(0);
+		assertEquals("A setup per style", 3, check.getRoles().size());
+		items.add(RebuildData.AVERNIC_TREADS, "Avernic treads", 145_000_000L,
+			ItemInfo.Stats.armour(5, 5, 5, 11, 15, 4, 2, 1));
+		item(check, "MELEE", "Abyssal whip", 1_500_000L, weapon(0, 82, 0, 0, 0, 82, 0, 4, false), 1);
+		final int boots = item(check, "MELEE", "Primordial boots", 30_000_000L, melee(2, 2, 5), 1);
+		owned.put(SPARE, 1L);
+
+		final Plan plan = planner.plan(treads, check, owned, 0, MAXED, SETTINGS, new Overrides());
+
+		assertEquals("Only melee has a weapon", 1, plan.getChecks().size());
+		final Plan.Check melee = plan.getChecks().get(0);
+		assertEquals("Melee", melee.getStyle());
+		assertEquals("Abyssal whip", melee.getWeapon());
+		assertEquals("Primordial boots", melee.getReplaces());
+		assertTrue(keeps(plan, "Abyssal whip"));
+		assertFalse("The treads take the boots' place", keeps(plan, "Primordial boots"));
+		assertNotNull("Boots the treads replace can be sold", sale(plan, boots));
+		assertNotNull(sale(plan, SPARE));
+		assertTrue(plan.isFunded());
+		assertTrue(plan.getSwaps().isEmpty());
+	}
+
+	/** Any other item: junk is sold, supplies keep their reserve, and gear is never touched. */
+	@Test
+	public void junkOnlyNeverSellsGear()
+	{
+		final RebuildData.Goal crossbow = RebuildData.junk(21012, "Dragon hunter crossbow");
+		assertTrue(crossbow.isJunk());
+		items.add(21012, "Dragon hunter crossbow", 60_000_000L, null);
+		final RebuildData.Method toa = toa(1_000_000_000L);
+		final int top = item(toa, "MAGIC", "Ancestral robe top", 120_000_000L, magic(35, 3), 1);
+		planner.setKnownGear(new HashSet<>(java.util.Collections.singletonList(top)));
+		owned.put(SPARE, 1L);
+		owned.put(PRAYER_POTION, 1000L);
+
+		final Plan plan = planner.plan(crossbow, crossbow.getMethods().get(0), owned, 0, MAXED, SETTINGS,
+			new Overrides());
+
+		assertEquals(60_000_000L, plan.getNeeded());
+		assertTrue("Gear is never sold for junk-only goals", sale(plan, top) == null);
+		assertNotNull(sale(plan, SPARE));
+		final Plan.Sale pots = sale(plan, PRAYER_POTION);
+		assertNotNull(pots);
+		assertTrue("A supply reserve stays", pots.getKept() > 0);
+		assertTrue(plan.isFunded());
+		assertTrue(plan.getKeeps().isEmpty());
+		assertTrue(plan.getChecks().isEmpty());
 	}
 
 	@Test

@@ -221,6 +221,14 @@ public class Planner
 	private final Set<Integer> sold = new HashSet<>();
 	private final Set<Integer> mainKept = new HashSet<>();
 
+	/** Every piece of gear any bundled setup lists, in all its forms; never sold as junk. */
+	private Set<Integer> knownGear = Collections.emptySet();
+
+	public void setKnownGear(Set<Integer> ids)
+	{
+		knownGear = ids == null ? Collections.emptySet() : ids;
+	}
+
 	public Planner(ItemInfo items, Map<String, List<Integer>> variants)
 	{
 		this.items = items;
@@ -615,7 +623,7 @@ public class Planner
 					{
 						continue;
 					}
-					final String name = i < slot.getItems().size() ? slot.getItems().get(i) : items.name(id);
+					final String name = i < slot.getItems().size() && slot.getItems().get(i) != null ? slot.getItems().get(i) : items.name(id);
 					options.add(new Option(id, i, name, ownedForm(id)));
 				}
 				role.slots.put(slot.getSlot(), options);
@@ -628,6 +636,10 @@ public class Planner
 			{
 				roles.add(role);
 			}
+		}
+		if (!goal.isMegarare())
+		{
+			return planLight(plan, roles, customQty);
 		}
 		if (main == null)
 		{
@@ -770,81 +782,7 @@ public class Planner
 		final long need = Math.max(0, plan.getGoalPrice() + buyCost - coins);
 		plan.setNeeded(need);
 
-		final List<Plan.Sale> pool = new ArrayList<>();
-		for (Map.Entry<Integer, Long> entry : owned.entrySet())
-		{
-			final int id = entry.getKey();
-			final long held = entry.getValue();
-			if (id == COINS || id == PLATINUM_TOKEN || goalIds.contains(id) || held <= 0
-				|| !items.tradeable(id))
-			{
-				continue;
-			}
-			final long price = items.price(id);
-			if (price <= 0)
-			{
-				continue;
-			}
-			final String name = items.name(id);
-			if (excluded.contains(id))
-			{
-				if (price * held >= settings.getMinStackValue() && !keepQty.containsKey(id))
-				{
-					plan.getExcluded().add(new Plan.Excluded(id, name));
-				}
-				continue;
-			}
-
-			final long kitKeep = keepQty.getOrDefault(id, 0L);
-			final Long custom = customQty.get(id);
-			final boolean forced = forceSell.contains(id);
-			final long sell;
-			if (custom != null)
-			{
-				sell = Math.max(0, Math.min(held - kitKeep, custom));
-			}
-			else if (forced)
-			{
-				// The player put this up themselves: all of it, however little it is worth.
-				sell = held - kitKeep;
-				if (sell <= 0)
-				{
-					continue;
-				}
-			}
-			else
-			{
-				long keep = kitKeep;
-				// Ammunition is only worth holding back if a weapon in the kit fires it:
-				// ruby dragon bolts are dead weight in a Twisted bow rebuild.
-				final boolean ammunition = DpsModel.kindOf(lower(id)) != DpsModel.Ammo.NONE;
-				if (keptAmmo.contains(id) || (held > 1 && !ammunition && isSupply(name)))
-				{
-					keep = Math.max(keep, Math.min(held, ammoReserve(id)));
-				}
-				sell = held - keep;
-				if (sell <= 0 || sell * price < settings.getMinStackValue())
-				{
-					continue;
-				}
-			}
-			pool.add(new Plan.Sale(id, name, sell, held - sell, held, sell * net(price), true, custom != null || forced));
-		}
-		// Ordered by what the whole stack is worth, so changing an amount does not
-		// move the row out from under the player's cursor.
-		pool.sort(Comparator.comparingLong((Plan.Sale s) -> s.getHeld() * items.price(s.getItemId())).reversed());
-
-		long raised = 0;
-		for (Plan.Sale sale : pool)
-		{
-			final boolean needed = sale.isCustom() || raised < need;
-			if (needed)
-			{
-				raised += sale.getProceeds();
-			}
-			plan.getSales().add(new Plan.Sale(sale.getItemId(), sale.getName(), sale.getQuantity(),
-				sale.getKept(), sale.getHeld(), sale.getProceeds(), needed, sale.isCustom()));
-		}
+		long raised = sellSpare(plan, keepQty, keptAmmo, customQty, need);
 
 		// ---- 2. Switches, a price tier at a time ---------------------------
 		final Map<Role, Integer> tier = new HashMap<>();
@@ -1144,7 +1082,104 @@ public class Planner
 			plan.setWorthIt(plan.getGainPct() >= settings.getMinGainPct());
 		}
 
-		// What else the player could put up: anything of value the plan leaves alone.
+		addAddable(plan);
+
+		final double bestDps = dps(main, bestPossible(main), false);
+		plan.setRaised(raised);
+		plan.setShortfall(Math.max(0, need - raised));
+		plan.setKitSold(kitSold);
+		plan.setDpsLossPct(main.startDps > 0 ? Math.max(0, (main.startDps - current) / main.startDps * 100) : 0);
+		plan.setDpsVersusBest(bestDps > 0 ? Math.min(1, current / bestDps) : 0);
+		plan.setEstGpPerHour((long) (method.getGpPerHour() * plan.getDpsVersusBest()));
+		return plan;
+	}
+
+	/** Step 1 of every plan: everything the kit does not use, biggest stacks first. */
+	private long sellSpare(Plan plan, Map<Integer, Long> keepQty, Set<Integer> keptAmmo, Map<Integer, Long> customQty,
+		long need)
+	{
+		final List<Plan.Sale> pool = new ArrayList<>();
+		for (Map.Entry<Integer, Long> entry : owned.entrySet())
+		{
+			final int id = entry.getKey();
+			final long held = entry.getValue();
+			if (id == COINS || id == PLATINUM_TOKEN || goalIds.contains(id) || held <= 0
+				|| !items.tradeable(id))
+			{
+				continue;
+			}
+			final long price = items.price(id);
+			if (price <= 0)
+			{
+				continue;
+			}
+			final String name = items.name(id);
+			if (excluded.contains(id))
+			{
+				if (price * held >= settings.getMinStackValue() && !keepQty.containsKey(id))
+				{
+					plan.getExcluded().add(new Plan.Excluded(id, name));
+				}
+				continue;
+			}
+
+			final long kitKeep = keepQty.getOrDefault(id, 0L);
+			final Long custom = customQty.get(id);
+			final boolean forced = forceSell.contains(id);
+			final long sell;
+			if (custom != null)
+			{
+				sell = Math.max(0, Math.min(held - kitKeep, custom));
+			}
+			else if (forced)
+			{
+				// The player put this up themselves: all of it, however little it is worth.
+				sell = held - kitKeep;
+				if (sell <= 0)
+				{
+					continue;
+				}
+			}
+			else
+			{
+				long keep = kitKeep;
+				// Ammunition is only worth holding back if a weapon in the kit fires it:
+				// ruby dragon bolts are dead weight in a Twisted bow rebuild.
+				final boolean ammunition = DpsModel.kindOf(lower(id)) != DpsModel.Ammo.NONE;
+				if (keptAmmo.contains(id) || (held > 1 && !ammunition && isSupply(name)))
+				{
+					keep = Math.max(keep, Math.min(held, ammoReserve(id)));
+				}
+				sell = held - keep;
+				if (sell <= 0 || sell * price < settings.getMinStackValue())
+				{
+					continue;
+				}
+			}
+			pool.add(new Plan.Sale(id, name, sell, held - sell, held, sell * net(price), true, custom != null || forced));
+		}
+		// Ordered by what the whole stack is worth, so changing an amount does not
+		// move the row out from under the player's cursor.
+		pool.sort(Comparator.comparingLong((Plan.Sale s) -> s.getHeld() * items.price(s.getItemId())).reversed());
+
+		long raised = 0;
+		for (Plan.Sale sale : pool)
+		{
+			final boolean needed = sale.isCustom() || raised < need;
+			if (needed)
+			{
+				raised += sale.getProceeds();
+			}
+			plan.getSales().add(new Plan.Sale(sale.getItemId(), sale.getName(), sale.getQuantity(),
+				sale.getKept(), sale.getHeld(), sale.getProceeds(), needed, sale.isCustom()));
+		}
+
+		return raised;
+	}
+
+	/** What else the player could put up: anything of value the plan leaves alone. */
+	private void addAddable(Plan plan)
+	{
 		final Set<Integer> selling = new HashSet<>(sold);
 		for (Plan.Sale sale : plan.getSales())
 		{
@@ -1166,13 +1201,74 @@ public class Planner
 		}
 		plan.getAddable().sort(Comparator.comparingLong(Plan.Choice::getPrice).reversed());
 
-		final double bestDps = dps(main, bestPossible(main), false);
+	}
+
+	/**
+	 * A gear upgrade or a junk-only goal: no money-making method and no selling the
+	 * kit down. An upgrade keeps the best owned setup in each style, checks what the
+	 * piece adds to it, and sells around it; junk-only keeps every piece of gear the
+	 * planner knows and sells only the rest.
+	 */
+	private Plan planLight(Plan plan, List<Role> roles, Map<Integer, Long> customQty)
+	{
+		final Map<Integer, Long> keepQty = new HashMap<>();
+		final Set<Integer> keptAmmo = new HashSet<>();
+		if (goal.isUpgrade())
+		{
+			final Rules ownedOnly = new Rules(Long.MAX_VALUE, false);
+			final String slot = goal.getSlot();
+			final boolean known = items.stats(goal.getId()) != null;
+			for (Role role : roles)
+			{
+				final Map<String, Option> best = choose(role, ownedOnly, false);
+				final Option weapon = best == null ? null : best.get("WEAPON");
+				if (weapon == null)
+				{
+					continue;
+				}
+				final String style = role.data.getStyle().charAt(0) + role.data.getStyle().substring(1).toLowerCase(Locale.ROOT);
+				final Option was = best.get(slot);
+				final Map<String, Option> with = new LinkedHashMap<>(best);
+				with.put(slot, new Option(goal.getId(), -1, goal.getName(), -1));
+				final double now = dps(role, best, false);
+				final double then = dps(role, with, false);
+				plan.getChecks().add(new Plan.Check(style, weapon.name, was == null ? null : was.name,
+					known && now > 0 ? (then - now) / now * 100 : 0));
+				for (Map.Entry<String, Option> entry : best.entrySet())
+				{
+					final Option option = entry.getValue();
+					if (option == null || option.ownedId < 0 || slot.equals(entry.getKey()))
+					{
+						continue;
+					}
+					keepQty.put(option.ownedId, 1L);
+					if ("AMMO".equals(entry.getKey()))
+					{
+						keptAmmo.add(option.ownedId);
+					}
+					plan.getKeeps().add(new Plan.Keep(option.ownedId, style, entry.getKey(), option.name, 1, false));
+				}
+				plan.getKeeps().add(new Plan.Keep(goal.getId(), style, slot, goal.getName(), 1, !plan.isAlreadyOwned()));
+			}
+		}
+		else
+		{
+			for (int id : knownGear)
+			{
+				final long held = owned.getOrDefault(id, 0L);
+				if (held > 0)
+				{
+					keepQty.put(id, held);
+				}
+			}
+		}
+
+		final long need = Math.max(0, plan.getGoalPrice() - plan.getCoins());
+		plan.setNeeded(need);
+		final long raised = sellSpare(plan, keepQty, keptAmmo, customQty, need);
+		addAddable(plan);
 		plan.setRaised(raised);
 		plan.setShortfall(Math.max(0, need - raised));
-		plan.setKitSold(kitSold);
-		plan.setDpsLossPct(main.startDps > 0 ? Math.max(0, (main.startDps - current) / main.startDps * 100) : 0);
-		plan.setDpsVersusBest(bestDps > 0 ? Math.min(1, current / bestDps) : 0);
-		plan.setEstGpPerHour((long) (method.getGpPerHour() * plan.getDpsVersusBest()));
 		return plan;
 	}
 

@@ -83,6 +83,24 @@ public class RebuildPanel extends PluginPanel
 		void clearReplacement(int soldId);
 
 		void resetAll();
+
+		/** Look up items by name; the answer comes back through {@link #showSearchResults}. */
+		void search(String query);
+
+		/** Plan for this item, selling junk only. */
+		void pickItem(int itemId, String name);
+	}
+
+	/** The last entry in the goal list: opens a search for any other item. */
+	private static final RebuildData.Goal SEARCH = searchGoal();
+
+	private static RebuildData.Goal searchGoal()
+	{
+		final RebuildData.Goal goal = new RebuildData.Goal();
+		goal.setName("Something else…");
+		goal.setKind("search");
+		goal.setMethods(java.util.Collections.emptyList());
+		return goal;
 	}
 
 	private static final String AUTO = "Best method for me";
@@ -238,6 +256,18 @@ public class RebuildPanel extends PluginPanel
 				remember(-1, "You reset all your changes");
 				raw.resetAll();
 			}
+
+			@Override
+			public void search(String query)
+			{
+				raw.search(query);
+			}
+
+			@Override
+			public void pickItem(int itemId, String name)
+			{
+				raw.pickItem(itemId, name);
+			}
 		};		setLayout(new BorderLayout(0, 8));
 		setBorder(new EmptyBorder(8, 8, 8, 8));
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -315,9 +345,11 @@ public class RebuildPanel extends PluginPanel
 		{
 			goalBox.addItem(goal);
 		}
+		goalBox.addItem(SEARCH);
 		top.add(goalBox);
 		top.add(Box.createVerticalStrut(4));
-		top.add(caption("Earn it back at"));
+		top.add(buildSearch());
+		top.add(methodCaption);
 		top.add(methodBox);
 		top.add(Box.createVerticalStrut(6));
 
@@ -359,6 +391,12 @@ public class RebuildPanel extends PluginPanel
 			}
 			fillMethods();
 			updateHero();
+			if (selectedGoal() == SEARCH)
+			{
+				// Nothing to plan until an item is picked from the search.
+				searchField.requestFocusInWindow();
+				return;
+			}
 			this.actions.changed();
 		});
 		methodBox.addActionListener(e ->
@@ -560,10 +598,126 @@ public class RebuildPanel extends PluginPanel
 	{
 		final RebuildData.Goal goal = selectedGoal();
 		goalIcon.setIcon(null);
-		if (goal != null)
+		final boolean search = goal == SEARCH;
+		final boolean megarare = goal != null && !search && goal.isMegarare();
+		// Only a megarare has money-making methods to pick from.
+		methodCaption.setVisible(megarare);
+		methodBox.setVisible(megarare);
+		searchBox.setVisible(search);
+		if (search)
+		{
+			goalName.setText("Pick an item");
+			tabRow.setVisible(false);
+			status.setVisible(false);
+			content.removeAll();
+			final JPanel card = card("Plan for any item", MUTED);
+			card.add(text("Type an item's name above and pick it from the list. The plan then sells "
+				+ "junk only - supplies above your reserve, drops and the like - and never touches gear "
+				+ "from any setup. Best for upgrades around 10m to 100m.", INNER - 20, Color.WHITE));
+			addCard(card);
+			content.revalidate();
+			content.repaint();
+		}
+		else if (goal != null)
 		{
 			itemManager.getImage(goal.getBuyId()).addTo(goalIcon);
 			goalName.setText(goal.getName());
+		}
+	}
+
+	// ---- Any other item ----------------------------------------------------
+
+	private final JLabel methodCaption = caption("Earn it back at");
+	private final JPanel searchBox = column();
+	private final javax.swing.JTextField searchField = new javax.swing.JTextField();
+	private final JPanel searchResults = column();
+
+	private JPanel buildSearch()
+	{
+		final JPanel field = new JPanel(new BorderLayout(3, 0));
+		field.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		searchField.setToolTipText("An item's name, e.g. Dragon hunter crossbow");
+		final javax.swing.JButton find = new javax.swing.JButton("Find");
+		find.setFont(FontManager.getRunescapeSmallFont());
+		find.setFocusPainted(false);
+		find.setMargin(new java.awt.Insets(2, 4, 2, 4));
+		final Runnable go = () ->
+		{
+			final String query = searchField.getText().trim();
+			if (query.length() >= 2)
+			{
+				searchResults.removeAll();
+				searchResults.add(left(caption("Searching…")));
+				searchResults.revalidate();
+				actions.search(query);
+			}
+		};
+		searchField.addActionListener(e -> go.run());
+		find.addActionListener(e -> go.run());
+		field.add(searchField, BorderLayout.CENTER);
+		field.add(find, BorderLayout.EAST);
+		searchBox.add(left(field));
+		searchBox.add(Box.createVerticalStrut(3));
+		searchBox.add(left(searchResults));
+		searchBox.add(Box.createVerticalStrut(6));
+		searchBox.setVisible(false);
+		return left(searchBox);
+	}
+
+	/** Search hits, most likely first. Runs on the Swing thread. */
+	public void showSearchResults(List<Plan.Choice> hits)
+	{
+		searchResults.removeAll();
+		if (hits.isEmpty())
+		{
+			searchResults.add(left(caption("No tradeable item by that name")));
+		}
+		for (Plan.Choice hit : hits)
+		{
+			final JPanel row = left(new JPanel(new BorderLayout(6, 0)));
+			row.setBackground(CARD);
+			row.setBorder(new EmptyBorder(1, 2, 1, 2));
+			row.add(icon(hit.getId(), 1), BorderLayout.WEST);
+			row.add(text("<span style='color:white'>" + esc(hit.getName()) + "</span><br>" + gp(hit.getPrice()),
+				ROW_TEXT, MUTED), BorderLayout.CENTER);
+			row.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+			row.setToolTipText("Plan for " + hit.getName());
+			row.addMouseListener(new MouseAdapter()
+			{
+				@Override
+				public void mouseClicked(MouseEvent e)
+				{
+					searchResults.removeAll();
+					searchField.setText("");
+					actions.pickItem(hit.getId(), hit.getName());
+				}
+			});
+			searchResults.add(row);
+			searchResults.add(Box.createVerticalStrut(2));
+		}
+		searchResults.revalidate();
+		searchResults.repaint();
+	}
+
+	/**
+	 * Puts a searched-for item in the goal list, just above "Something else", in
+	 * place of the last one, and selects it. Runs on the Swing thread.
+	 */
+	public void setCustomGoal(RebuildData.Goal goal, boolean select)
+	{
+		loading = true;
+		for (int i = goalBox.getItemCount() - 1; i >= 0; i--)
+		{
+			if (goalBox.getItemAt(i).isJunk())
+			{
+				goalBox.removeItemAt(i);
+			}
+		}
+		goalBox.insertItemAt(goal, goalBox.getItemCount() - 1);
+		loading = false;
+		if (select)
+		{
+			goalBox.setSelectedItem(goal);
 		}
 	}
 
@@ -1088,6 +1242,7 @@ public class RebuildPanel extends PluginPanel
 
 		diff(plan);
 		updateStatus(plan);
+		final RebuildData.Goal goal = plan.getGoal();
 		if (selectedTab == SELL_TAB)
 		{
 			// Everything you can act on: what goes, and your own changes.
@@ -1095,6 +1250,21 @@ public class RebuildPanel extends PluginPanel
 			addSwaps(plan);
 			addSales(plan);
 			addExcluded(plan);
+		}
+		else if (goal.isUpgrade())
+		{
+			// No money to earn back: what the piece adds, and the gear kept around it.
+			addSummary(plan);
+			addChecks(plan);
+			addKeeps(plan);
+		}
+		else if (goal.isJunk())
+		{
+			addSummary(plan);
+			final JPanel card = card("Junk only", MUTED);
+			card.add(text(esc(plan.getMethod().getNote()) + " Pick anything else to sell from the Sell tab.",
+				INNER - 20, ColorScheme.LIGHT_GRAY_COLOR));
+			addCard(card);
 		}
 		else
 		{
@@ -1181,6 +1351,12 @@ public class RebuildPanel extends PluginPanel
 		else if (plan.isFunded())
 		{
 			verdict = "Affordable. Sell the items below to raise " + gp(plan.getNeeded()) + ".";
+		}
+		else if (!plan.getGoal().isMegarare())
+		{
+			verdict = "Short by " + gp(plan.getShortfall()) + " after selling "
+				+ (plan.getGoal().isJunk() ? "all your junk" : "everything your setups don't use")
+				+ ". Add more from the Sell tab, or come back with more coins.";
 		}
 		else
 		{
@@ -1574,6 +1750,40 @@ public class RebuildPanel extends PluginPanel
 	}
 
 	/** Every piece to hold on to, as a grid of pictures per setup. */
+	/** For a gear upgrade: what it adds to the best setup in each style. */
+	private void addChecks(Plan plan)
+	{
+		final RebuildData.Goal goal = plan.getGoal();
+		final JPanel card = card("Damage check", ColorScheme.BRAND_ORANGE);
+		if (plan.getChecks().isEmpty())
+		{
+			card.add(text("You own no weapon from the planner's lists in any style, so there is nothing to check "
+				+ goal.getName() + " against.", INNER - 20, ColorScheme.LIGHT_GRAY_COLOR));
+			addCard(card);
+			return;
+		}
+		for (Plan.Check check : plan.getChecks())
+		{
+			final double gain = check.getGainPct();
+			final String change = Math.abs(gain) < 0.05 ? "no change"
+				: String.format("%s%.1f%% damage", gain > 0 ? "+" : "", gain);
+			final Color colour = gain >= 0.5 ? GOOD : gain > -0.05 ? WARN : BAD;
+			card.add(text("<b>" + esc(check.getStyle()) + "</b> <span style='color:" + hex(colour) + "'>" + change
+				+ "</span><br>with your " + esc(check.getWeapon()) + ", over "
+				+ (check.getReplaces() == null ? "no boots" : "your " + esc(check.getReplaces())),
+				INNER - 20, ColorScheme.LIGHT_GRAY_COLOR));
+			card.add(Box.createVerticalStrut(4));
+		}
+		if (goal.getId() == RebuildData.AVERNIC_TREADS)
+		{
+			card.add(text("Each of primordial, pegasian and eternal boots can be added to the treads later "
+				+ "(4,000 demon tears each) for a little more in its style. Exclude them on the Sell tab "
+				+ "if you mean to do that.", INNER - 20, MUTED));
+		}
+		card.add(text("Checked against one boss per style, with the best gear you own in each.", INNER - 20, MUTED));
+		addCard(card);
+	}
+
 	private void addKeeps(Plan plan)
 	{
 		final Map<String, List<Plan.Keep>> byRole = new LinkedHashMap<>();
@@ -1603,7 +1813,8 @@ public class RebuildPanel extends PluginPanel
 					anyToBuy = true;
 					picture.setBorder(BorderFactory.createLineBorder(WARN, 1));
 				}
-				picture.setToolTipText(keep.isToBuy() ? "Buy: " + keep.getName() + " (replaces a piece you sell)" : keep.getQuantity() > 1
+				picture.setToolTipText(keep.isToBuy() ? "Buy: " + keep.getName()
+					+ (keep.getItemId() == plan.getGoal().getId() ? " (the upgrade)" : " (replaces a piece you sell)") : keep.getQuantity() > 1
 					? gp(keep.getQuantity()) + " x " + keep.getName() + " - one full charge" : keep.getName());
 				grid.add(picture);
 			}

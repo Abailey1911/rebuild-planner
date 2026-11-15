@@ -48,6 +48,16 @@ A "What changed" card shows what each of your changes added to or dropped from t
 | Scythe of vitur | Theatre of Blood, Duke Sucellus, Vardorvis |
 | Obligator | The Fractured Archive |
 
+## Smaller upgrades
+
+- **Avernic treads** - no money-making method. The plan finds your best gear in each
+  style, checks how much damage the treads add to it, keeps that gear, and sells around
+  it. The boots the treads replace are up for sale unless you exclude them to upgrade the
+  treads with later.
+- **Something else…** - search for any item (best for upgrades around 10m to 100m). The
+  plan sells junk only: supplies above your reserve, drops and anything else that is not
+  gear from the planner's lists. Your setups are never touched.
+
 ## Settings
 
 - **Smallest stack to sell** - bank stacks worth less than this are ignored (default 1m).

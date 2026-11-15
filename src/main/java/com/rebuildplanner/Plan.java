@@ -97,6 +97,20 @@ public class Plan
 		long price;
 	}
 
+	/** For a gear upgrade: what it adds to one style's best setup. */
+	@Value
+	public static class Check
+	{
+		/** Melee, Ranged or Magic. */
+		String style;
+		/** The weapon the setup is built around. */
+		String weapon;
+		/** What the player wears in the upgrade's slot today; null for nothing. */
+		String replaces;
+		/** Damage gained, in percent; 0 when it could not be worked out. */
+		double gainPct;
+	}
+
 	/** Something the player has said not to sell. */
 	@Value
 	public static class Excluded
@@ -124,6 +138,8 @@ public class Plan
 	private final List<Excluded> excluded = new ArrayList<>();
 	/** Things the player holds that the plan leaves alone but they could choose to sell; price is the stack's value. */
 	private final List<Choice> addable = new ArrayList<>();
+	/** For a gear upgrade: the damage check in each style. */
+	private final List<Check> checks = new ArrayList<>();
 	/** Damage given up per setup, in percent, for setups that were sold down. */
 	private final Map<String, Double> roleLoss = new LinkedHashMap<>();
 

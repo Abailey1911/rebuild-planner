@@ -38,6 +38,7 @@ import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.ImageUtil;
+import net.runelite.http.api.item.ItemPrice;
 
 @Slf4j
 @PluginDescriptor(
@@ -116,12 +117,18 @@ public class RebuildPlannerPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		goals = RebuildData.loadGoals(gson);
+		goals = new java.util.concurrent.CopyOnWriteArrayList<>(RebuildData.loadGoals(gson));
 		final Map<String, List<Integer>> variants = RebuildData.loadVariants(gson);
 		components = RebuildData.loadComponents(gson);
 		facts = new ItemFacts(new ClientItemInfo(), components);
 		planner = new Planner(facts, variants);
 		dataItems = dataItems(goals, variants, components);
+		planner.setKnownGear(dataItems);
+		final RebuildData.Goal custom = loadCustomGoal();
+		if (custom != null)
+		{
+			goals.add(custom);
+		}
 
 		overrides = loadOverrides();
 		saved = loadSaved();
@@ -380,6 +387,7 @@ public class RebuildPlannerPlugin extends Plugin
 		// thread; the planning itself runs in the background.
 		facts.load(dataItems);
 		facts.load(owned.keySet());
+		facts.load(java.util.Arrays.asList(goal.getId(), goal.getBuyId()));
 		final long coins = owned.getOrDefault(Planner.COINS, 0L)
 			+ owned.getOrDefault(Planner.PLATINUM_TOKEN, 0L) * 1000L;
 		final Overrides choices = copy(overrides);
@@ -425,6 +433,73 @@ public class RebuildPlannerPlugin extends Plugin
 				});
 			}
 		});
+	}
+
+	// ---- Any other item --------------------------------------------------------
+
+	private static final String CUSTOM_KEY = "customItem";
+	private static final int MAX_HITS = 12;
+
+	/** The last item searched for and picked, so it and plans saved for it survive a restart. */
+	private RebuildData.Goal loadCustomGoal()
+	{
+		final String saved = configManager.getConfiguration(RebuildPlannerConfig.GROUP, CUSTOM_KEY);
+		final int bar = saved == null ? -1 : saved.indexOf('|');
+		if (bar <= 0)
+		{
+			return null;
+		}
+		try
+		{
+			return RebuildData.junk(Integer.parseInt(saved.substring(0, bar)), saved.substring(bar + 1));
+		}
+		catch (NumberFormatException e)
+		{
+			return null;
+		}
+	}
+
+	private void search(String query)
+	{
+		final RebuildPanel target = panel;
+		if (target == null)
+		{
+			return;
+		}
+		clientThread.invokeLater(() ->
+		{
+			final String lower = query.toLowerCase(java.util.Locale.ROOT);
+			final List<Plan.Choice> hits = new ArrayList<>();
+			for (ItemPrice item : itemManager.search(query))
+			{
+				final long price = itemManager.getItemPrice(item.getId());
+				if (price > 0)
+				{
+					hits.add(new Plan.Choice(item.getId(), item.getId(), item.getName(), false, price));
+				}
+			}
+			// An exact name first, then names starting with what was typed, then the dearest.
+			hits.sort(java.util.Comparator
+				.comparing((Plan.Choice c) -> !c.getName().equalsIgnoreCase(query))
+				.thenComparing(c -> !c.getName().toLowerCase(java.util.Locale.ROOT).startsWith(lower))
+				.thenComparing(Plan.Choice::getPrice, java.util.Comparator.reverseOrder()));
+			final List<Plan.Choice> top = new ArrayList<>(hits.subList(0, Math.min(MAX_HITS, hits.size())));
+			SwingUtilities.invokeLater(() -> target.showSearchResults(top));
+		});
+	}
+
+	private void pickItem(int itemId, String name)
+	{
+		final RebuildPanel target = panel;
+		if (target == null)
+		{
+			return;
+		}
+		final RebuildData.Goal goal = RebuildData.junk(itemId, name);
+		goals.removeIf(RebuildData.Goal::isJunk);
+		goals.add(goal);
+		configManager.setConfiguration(RebuildPlannerConfig.GROUP, CUSTOM_KEY, itemId + "|" + name);
+		target.setCustomGoal(goal, true);
 	}
 
 	// ---- Saved plans ---------------------------------------------------------
@@ -720,6 +795,18 @@ public class RebuildPlannerPlugin extends Plugin
 		{
 			overrides = new Overrides();
 			overridesChanged();
+		}
+
+		@Override
+		public void search(String query)
+		{
+			RebuildPlannerPlugin.this.search(query);
+		}
+
+		@Override
+		public void pickItem(int itemId, String name)
+		{
+			RebuildPlannerPlugin.this.pickItem(itemId, name);
 		}
 	}
 
