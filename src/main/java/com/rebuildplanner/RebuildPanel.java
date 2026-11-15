@@ -636,26 +636,44 @@ public class RebuildPanel extends PluginPanel
 	{
 		final JPanel field = new JPanel(new BorderLayout(3, 0));
 		field.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		searchField.setToolTipText("An item's name, e.g. Dragon hunter crossbow");
-		final javax.swing.JButton find = new javax.swing.JButton("Find");
-		find.setFont(FontManager.getRunescapeSmallFont());
-		find.setFocusPainted(false);
-		find.setMargin(new java.awt.Insets(2, 4, 2, 4));
-		final Runnable go = () ->
+		searchField.setToolTipText("Start typing an item's name, e.g. Dragon hunter crossbow");
+		// Search as the player types, once they pause for a moment.
+		final javax.swing.Timer typing = new javax.swing.Timer(200, e -> runSearch());
+		typing.setRepeats(false);
+		searchField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener()
 		{
-			final String query = searchField.getText().trim();
-			if (query.length() >= 2)
+			@Override
+			public void insertUpdate(javax.swing.event.DocumentEvent e)
 			{
-				searchResults.removeAll();
-				searchResults.add(left(caption("Searching…")));
-				searchResults.revalidate();
-				actions.search(query);
+				typing.restart();
 			}
-		};
-		searchField.addActionListener(e -> go.run());
-		find.addActionListener(e -> go.run());
+
+			@Override
+			public void removeUpdate(javax.swing.event.DocumentEvent e)
+			{
+				typing.restart();
+			}
+
+			@Override
+			public void changedUpdate(javax.swing.event.DocumentEvent e)
+			{
+				typing.restart();
+			}
+		});
+		// Enter picks the top hit.
+		searchField.addActionListener(e ->
+		{
+			typing.stop();
+			if (topHit != null && searchField.getText().trim().equals(searchQuery))
+			{
+				pick(topHit);
+			}
+			else
+			{
+				runSearch();
+			}
+		});
 		field.add(searchField, BorderLayout.CENTER);
-		field.add(find, BorderLayout.EAST);
 		searchBox.add(left(field));
 		searchBox.add(Box.createVerticalStrut(3));
 		searchBox.add(left(searchResults));
@@ -664,9 +682,43 @@ public class RebuildPanel extends PluginPanel
 		return left(searchBox);
 	}
 
-	/** Search hits, most likely first. Runs on the Swing thread. */
-	public void showSearchResults(List<Plan.Choice> hits)
+	/** What the shown results were searched for, and the first of them. */
+	private String searchQuery = "";
+	private Plan.Choice topHit;
+
+	private void runSearch()
 	{
+		final String query = searchField.getText().trim();
+		if (query.length() < 2)
+		{
+			searchQuery = query;
+			topHit = null;
+			searchResults.removeAll();
+			searchResults.revalidate();
+			searchResults.repaint();
+			return;
+		}
+		actions.search(query);
+	}
+
+	private void pick(Plan.Choice hit)
+	{
+		searchResults.removeAll();
+		topHit = null;
+		searchField.setText("");
+		actions.pickItem(hit.getId(), hit.getName());
+	}
+
+	/** Search hits, most likely first. Runs on the Swing thread. */
+	public void showSearchResults(String query, List<Plan.Choice> hits)
+	{
+		if (!query.equals(searchField.getText().trim()))
+		{
+			// The player has typed more since; a newer search is on its way.
+			return;
+		}
+		searchQuery = query;
+		topHit = hits.isEmpty() ? null : hits.get(0);
 		searchResults.removeAll();
 		if (hits.isEmpty())
 		{
@@ -687,9 +739,7 @@ public class RebuildPanel extends PluginPanel
 				@Override
 				public void mouseClicked(MouseEvent e)
 				{
-					searchResults.removeAll();
-					searchField.setText("");
-					actions.pickItem(hit.getId(), hit.getName());
+					pick(hit);
 				}
 			});
 			searchResults.add(row);

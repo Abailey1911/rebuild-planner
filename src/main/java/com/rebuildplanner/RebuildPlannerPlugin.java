@@ -484,7 +484,7 @@ public class RebuildPlannerPlugin extends Plugin
 				.thenComparing(c -> !c.getName().toLowerCase(java.util.Locale.ROOT).startsWith(lower))
 				.thenComparing(Plan.Choice::getPrice, java.util.Comparator.reverseOrder()));
 			final List<Plan.Choice> top = new ArrayList<>(hits.subList(0, Math.min(MAX_HITS, hits.size())));
-			SwingUtilities.invokeLater(() -> target.showSearchResults(top));
+			SwingUtilities.invokeLater(() -> target.showSearchResults(query, top));
 		});
 	}
 
