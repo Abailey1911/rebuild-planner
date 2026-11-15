@@ -40,7 +40,8 @@ tasks.register('run', JavaExec) {
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass = pluginMainClass
 
-	jvmArgs "-ea"
+	// No -ea: RuneLite's own GPU plugin trips an assertion mid-fight, which the
+	// normal client never checks and which stalls a dev client.
 	args "--developer-mode", "--debug"
 }
 
