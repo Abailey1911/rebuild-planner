@@ -611,9 +611,12 @@ public class RebuildPanel extends PluginPanel
 			status.setVisible(false);
 			content.removeAll();
 			final JPanel card = card("Plan for any item", MUTED);
-			card.add(text("Type an item's name above and pick it from the list. The plan then sells "
-				+ "junk only - supplies above your reserve, drops and the like - and never touches gear "
-				+ "from any setup. Best for upgrades around 10m to 100m.", INNER - 20, Color.WHITE));
+			card.add(text("Type an item's name above and pick it from the list.<br><br>"
+				+ "<b>Gear</b> (Torva, Masori, a Bow of faerdhinen...) is checked against your best setup in "
+				+ "its style, and the pieces it beats are sold - Bandos for Torva, Armadyl for Masori. "
+				+ "Pick a <b>set</b> line to plan the helm, body and legs together.<br><br>"
+				+ "<b>Anything else</b> is paid for with junk only - supplies above your reserve, drops and "
+				+ "the like - and never touches gear from any setup.", INNER - 20, Color.WHITE));
 			addCard(card);
 			content.revalidate();
 			content.repaint();
@@ -701,6 +704,39 @@ public class RebuildPanel extends PluginPanel
 		actions.search(query);
 	}
 
+	/**
+	 * Makes a whole row clickable. The listener goes on every part of it, because the
+	 * wrapped text inside is an editor pane that keeps clicks to itself; and it acts on
+	 * release anywhere over the row, so a click that moves a pixel still counts.
+	 */
+	private static void onClick(JComponent row, Runnable action)
+	{
+		final MouseAdapter listener = new MouseAdapter()
+		{
+			@Override
+			public void mouseReleased(MouseEvent e)
+			{
+				if (javax.swing.SwingUtilities.isLeftMouseButton(e)
+					&& row.contains(javax.swing.SwingUtilities.convertPoint(e.getComponent(), e.getPoint(), row)))
+				{
+					action.run();
+				}
+			}
+		};
+		final java.util.ArrayDeque<java.awt.Component> todo = new java.util.ArrayDeque<>();
+		todo.add(row);
+		while (!todo.isEmpty())
+		{
+			final java.awt.Component c = todo.poll();
+			c.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+			c.addMouseListener(listener);
+			if (c instanceof java.awt.Container)
+			{
+				todo.addAll(java.util.Arrays.asList(((java.awt.Container) c).getComponents()));
+			}
+		}
+	}
+
 	private void pick(Plan.Choice hit)
 	{
 		searchResults.removeAll();
@@ -732,16 +768,8 @@ public class RebuildPanel extends PluginPanel
 			row.add(icon(hit.getId(), 1), BorderLayout.WEST);
 			row.add(text("<span style='color:white'>" + esc(hit.getName()) + "</span><br>" + gp(hit.getPrice()),
 				ROW_TEXT, MUTED), BorderLayout.CENTER);
-			row.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
 			row.setToolTipText("Plan for " + hit.getName());
-			row.addMouseListener(new MouseAdapter()
-			{
-				@Override
-				public void mouseClicked(MouseEvent e)
-				{
-					pick(hit);
-				}
-			});
+			onClick(row, () -> pick(hit));
 			searchResults.add(row);
 			searchResults.add(Box.createVerticalStrut(2));
 		}
@@ -758,7 +786,7 @@ public class RebuildPanel extends PluginPanel
 		loading = true;
 		for (int i = goalBox.getItemCount() - 1; i >= 0; i--)
 		{
-			if (goalBox.getItemAt(i).isJunk())
+			if (goalBox.getItemAt(i).isCustom())
 			{
 				goalBox.removeItemAt(i);
 			}
@@ -1820,7 +1848,9 @@ public class RebuildPanel extends PluginPanel
 			final Color colour = gain >= 0.5 ? GOOD : gain > -0.05 ? WARN : BAD;
 			card.add(text("<b>" + esc(check.getStyle()) + "</b> <span style='color:" + hex(colour) + "'>" + change
 				+ "</span><br>with your " + esc(check.getWeapon()) + ", over "
-				+ (check.getReplaces() == null ? "no boots" : "your " + esc(check.getReplaces())),
+				+ (check.getReplaces() == null ? "an empty slot" : "your " + esc(check.getReplaces()))
+				+ (gain < 0 && check.getReplaces() != null ? "<br><span style='color:" + hex(MUTED)
+					+ "'>Not an upgrade here, so your " + esc(check.getReplaces()) + " stays.</span>" : ""),
 				INNER - 20, ColorScheme.LIGHT_GRAY_COLOR));
 			card.add(Box.createVerticalStrut(4));
 		}

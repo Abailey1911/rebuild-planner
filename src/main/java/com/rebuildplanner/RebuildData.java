@@ -44,6 +44,28 @@ public final class RebuildData
 		private String kind;
 		/** For an upgrade: the equipment slot it goes in. */
 		private String slot;
+		/** For an upgrade: every piece bought, one per slot (a whole armour set has several). */
+		private List<Piece> pieces;
+		/** For an upgrade: the combat styles it is for (MELEE, RANGED, MAGIC); null for all. */
+		private List<String> styles;
+		/** True for the one goal the player found with the item search. */
+		private boolean custom;
+
+		/** The pieces bought; an upgrade with just a slot counts as one piece. */
+		public List<Piece> pieceList()
+		{
+			if (pieces != null && !pieces.isEmpty())
+			{
+				return pieces;
+			}
+			return slot == null ? Collections.emptyList()
+				: Collections.singletonList(new Piece(id, buyId, name, slot));
+		}
+
+		public boolean appliesTo(String style)
+		{
+			return styles == null || styles.isEmpty() || styles.contains(style);
+		}
 
 		public boolean isMegarare()
 		{
@@ -65,6 +87,27 @@ public final class RebuildData
 		{
 			return name;
 		}
+	}
+
+	/** One piece of a gear upgrade: the id worn, the id bought, and its slot. */
+	@Data
+	@lombok.NoArgsConstructor
+	@lombok.AllArgsConstructor
+	public static class Piece
+	{
+		private int id;
+		private int buyId;
+		private String name;
+		private String slot;
+	}
+
+	/** One place an item is used: a style's slot. */
+	@lombok.Value
+	public static class Use
+	{
+		String style;
+		String slot;
+		String name;
 	}
 
 	@Data
@@ -265,6 +308,57 @@ public final class RebuildData
 		return goal;
 	}
 
+	/**
+	 * Gear the player searched for: one piece or a whole armour set, for the styles it is
+	 * used in. Checked like the treads; the pieces it beats are sold and the rest is kept.
+	 */
+	public static Goal gear(List<Goal> megarares, String name, List<Piece> pieces, List<String> styles)
+	{
+		final Piece first = pieces.get(0);
+		final Goal goal = upgrade(megarares, name, first.getId(), first.getSlot(),
+			"Checked against your best gear in " + (styles == null || styles.isEmpty() ? "each style"
+				: styles.size() == 1 ? "its style" : "each style it is used in")
+				+ ". The pieces it beats are sold; the rest of your gear is kept.");
+		goal.setBuyId(first.getBuyId());
+		goal.setPieces(new ArrayList<>(pieces));
+		goal.setStyles(styles == null ? null : new ArrayList<>(styles));
+		goal.setCustom(true);
+		return goal;
+	}
+
+	/** Where each item in the megarares' gear lists is used (style and slot), by list id. */
+	public static Map<Integer, List<Use>> gearIndex(List<Goal> megarares)
+	{
+		final Map<Integer, List<Use>> index = new LinkedHashMap<>();
+		for (Goal goal : megarares)
+		{
+			if (!goal.isMegarare())
+			{
+				continue;
+			}
+			for (Method m : goal.getMethods())
+			{
+				for (Role role : m.getRoles())
+				{
+					for (Slot s : role.getSlots())
+					{
+						for (int i = 0; i < s.getIds().size(); i++)
+						{
+							final String item = i < s.getItems().size() ? s.getItems().get(i) : null;
+							final Use use = new Use(role.getStyle(), s.getSlot(), item);
+							final List<Use> uses = index.computeIfAbsent(s.getIds().get(i), k -> new ArrayList<>());
+							if (!uses.contains(use))
+							{
+								uses.add(use);
+							}
+						}
+					}
+				}
+			}
+		}
+		return index;
+	}
+
 	/** Any item at all, paid for by selling junk only: the player's gear is never touched. */
 	public static Goal junk(int id, String name)
 	{
@@ -280,6 +374,7 @@ public final class RebuildData
 		goal.setBuyId(id);
 		goal.setStyle("ALL");
 		goal.setKind(JUNK);
+		goal.setCustom(true);
 		goal.setCharges(Collections.emptyList());
 		goal.setMethods(Collections.singletonList(method));
 		return goal;

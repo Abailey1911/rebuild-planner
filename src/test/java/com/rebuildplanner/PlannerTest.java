@@ -253,6 +253,78 @@ public class PlannerTest
 		assertTrue(plan.getSwaps().isEmpty());
 	}
 
+	private List<RebuildData.Goal> megarares()
+	{
+		final List<RebuildData.Goal> out = new java.util.ArrayList<>();
+		for (RebuildData.Goal goal : goals)
+		{
+			if (goal.isMegarare())
+			{
+				out.add(goal);
+			}
+		}
+		return out;
+	}
+
+	/** A searched-for Torva set: the Bandos and faceguard it beats are sold; magic gear is left alone. */
+	@Test
+	public void torvaSetSellsTheMeleeArmourItBeats()
+	{
+		final RebuildData.Method lists = goal("Avernic treads").getMethods().get(0);
+		item(lists, "MELEE", "Abyssal whip", 1_500_000L, weapon(0, 82, 0, 0, 0, 82, 0, 4, false), 1);
+		final int chest = item(lists, "MELEE", "Bandos chestplate", 15_000_000L, melee(0, 0, 4), 1);
+		final int tassets = item(lists, "MELEE", "Bandos tassets", 20_000_000L, melee(0, 0, 2), 1);
+		final int faceguard = item(lists, "MELEE", "Neitiznot faceguard", 30_000_000L, melee(0, 0, 0), 1);
+		item(lists, "MAGIC", "Trident of the swamp", 20_000_000L, weapon(0, 0, 0, 25, 0, 0, 0, 4, false), 1);
+		final int hat = item(lists, "MAGIC", "Ancestral hat", 40_000_000L, magic(8, 2), 1);
+		owned.put(SPARE, 1L);
+
+		final java.util.List<RebuildData.Piece> torva = java.util.Arrays.asList(
+			new RebuildData.Piece(26382, 26376, "Torva full helm", "HEAD"),
+			new RebuildData.Piece(26384, 26378, "Torva platebody", "BODY"),
+			new RebuildData.Piece(26386, 26380, "Torva platelegs", "LEGS"));
+		items.add(26382, "Torva full helm", 0, melee(0, 0, 8));
+		items.add(26384, "Torva platebody", 0, melee(0, 0, 6));
+		items.add(26386, "Torva platelegs", 0, melee(0, 0, 4));
+		items.add(26376, "Torva full helm (damaged)", 300_000_000L, null);
+		items.add(26378, "Torva platebody (damaged)", 300_000_000L, null);
+		items.add(26380, "Torva platelegs (damaged)", 300_000_000L, null);
+		final RebuildData.Goal goal = RebuildData.gear(megarares(), "Torva set", torva,
+			java.util.Collections.singletonList("MELEE"));
+
+		final Plan plan = planner.plan(goal, goal.getMethods().get(0), owned, 0, MAXED, SETTINGS, new Overrides());
+
+		assertEquals("The whole set is paid for", 900_000_000L, plan.getGoalPrice());
+		assertEquals("Only melee is checked", 1, plan.getChecks().size());
+		assertTrue(plan.getChecks().get(0).getGainPct() > 0);
+		assertNotNull("Bandos chestplate is sold", sale(plan, chest));
+		assertNotNull("Bandos tassets are sold", sale(plan, tassets));
+		assertNotNull("The faceguard is sold", sale(plan, faceguard));
+		assertTrue("Torva goes in the kit", keeps(plan, "Torva platebody"));
+		assertTrue("Magic gear is kept", keeps(plan, "Ancestral hat"));
+		assertEquals(null, sale(plan, hat));
+		assertTrue(keeps(plan, "Abyssal whip"));
+	}
+
+	/** A searched-for weapon worse than the one owned never sells the better one. */
+	@Test
+	public void gearWorseThanWhatIsOwnedSellsNothing()
+	{
+		final RebuildData.Method lists = goal("Avernic treads").getMethods().get(0);
+		final int acb = item(lists, "RANGED", "Armadyl crossbow", 30_000_000L, weapon(0, 0, 0, 0, 100, 0, 0, 5, false), 1);
+		items.add(9185, "Rune crossbow", 10_000L, weapon(0, 0, 0, 0, 90, 0, 0, 5, false));
+		final RebuildData.Goal goal = RebuildData.gear(megarares(), "Rune crossbow",
+			java.util.Collections.singletonList(new RebuildData.Piece(9185, 9185, "Rune crossbow", "WEAPON")),
+			java.util.Collections.singletonList("RANGED"));
+
+		final Plan plan = planner.plan(goal, goal.getMethods().get(0), owned, 0, MAXED, SETTINGS, new Overrides());
+
+		assertEquals(1, plan.getChecks().size());
+		assertTrue("A downgrade", plan.getChecks().get(0).getGainPct() < 0);
+		assertEquals("The better crossbow stays", null, sale(plan, acb));
+		assertTrue(keeps(plan, "Armadyl crossbow"));
+	}
+
 	/** Any other item: junk is sold, supplies keep their reserve, and gear is never touched. */
 	@Test
 	public void junkOnlyNeverSellsGear()

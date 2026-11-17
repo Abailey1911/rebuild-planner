@@ -118,12 +118,13 @@ public class RebuildPlannerPlugin extends Plugin
 	protected void startUp()
 	{
 		goals = new java.util.concurrent.CopyOnWriteArrayList<>(RebuildData.loadGoals(gson));
-		final Map<String, List<Integer>> variants = RebuildData.loadVariants(gson);
+		variants = RebuildData.loadVariants(gson);
 		components = RebuildData.loadComponents(gson);
 		facts = new ItemFacts(new ClientItemInfo(), components);
 		planner = new Planner(facts, variants);
 		dataItems = dataItems(goals, variants, components);
 		planner.setKnownGear(dataItems);
+		gearIndex = RebuildData.gearIndex(goals);
 		final RebuildData.Goal custom = loadCustomGoal();
 		if (custom != null)
 		{
@@ -388,6 +389,10 @@ public class RebuildPlannerPlugin extends Plugin
 		facts.load(dataItems);
 		facts.load(owned.keySet());
 		facts.load(java.util.Arrays.asList(goal.getId(), goal.getBuyId()));
+		for (RebuildData.Piece piece : goal.pieceList())
+		{
+			facts.load(java.util.Arrays.asList(piece.getId(), piece.getBuyId()));
+		}
 		final long coins = owned.getOrDefault(Planner.COINS, 0L)
 			+ owned.getOrDefault(Planner.PLATINUM_TOKEN, 0L) * 1000L;
 		final Overrides choices = copy(overrides);
@@ -439,11 +444,59 @@ public class RebuildPlannerPlugin extends Plugin
 
 	private static final String CUSTOM_KEY = "customItem";
 	private static final int MAX_HITS = 12;
+	private static final java.util.regex.Pattern TRADE_FORM = java.util.regex.Pattern.compile(
+		"\\s*\\((damaged|inactive|uncharged|empty|broken|u|deadman)\\)$", java.util.regex.Pattern.CASE_INSENSITIVE);
+	private static final List<String> ARMOUR = java.util.Arrays.asList("HEAD", "BODY", "LEGS");
+
+	/** Where each piece of gear in the bundled lists is used, by list id. */
+	private Map<Integer, List<RebuildData.Use>> gearIndex = java.util.Collections.emptyMap();
+	/** Item id to the other ids that count as owning it (charged, cosmetic and other forms). */
+	private Map<String, List<Integer>> variants = java.util.Collections.emptyMap();
+	/** Whole armour sets offered in the last search, by the name shown. */
+	private final Map<String, List<RebuildData.Piece>> searchSets = new java.util.concurrent.ConcurrentHashMap<>();
+
+	/** What a saved gear goal is stored as. */
+	@lombok.Data
+	private static final class SavedGear
+	{
+		private String name;
+		private List<String> styles;
+		private List<RebuildData.Piece> pieces;
+	}
+
+	private List<RebuildData.Goal> megarares()
+	{
+		final List<RebuildData.Goal> out = new ArrayList<>();
+		for (RebuildData.Goal goal : goals)
+		{
+			if (goal.isMegarare())
+			{
+				out.add(goal);
+			}
+		}
+		return out;
+	}
 
 	/** The last item searched for and picked, so it and plans saved for it survive a restart. */
 	private RebuildData.Goal loadCustomGoal()
 	{
 		final String saved = configManager.getConfiguration(RebuildPlannerConfig.GROUP, CUSTOM_KEY);
+		if (saved != null && saved.startsWith("{"))
+		{
+			try
+			{
+				final SavedGear gear = gson.fromJson(saved, SavedGear.class);
+				if (gear != null && gear.getName() != null && gear.getPieces() != null && !gear.getPieces().isEmpty())
+				{
+					return RebuildData.gear(megarares(), gear.getName(), gear.getPieces(), gear.getStyles());
+				}
+			}
+			catch (RuntimeException e)
+			{
+				log.debug("Discarding an unreadable saved item", e);
+			}
+			return null;
+		}
 		final int bar = saved == null ? -1 : saved.indexOf('|');
 		if (bar <= 0)
 		{
@@ -457,6 +510,143 @@ public class RebuildPlannerPlugin extends Plugin
 		{
 			return null;
 		}
+	}
+
+	/**
+	 * The gear-list id an item counts as: itself, the form it is a variant of (a Bow of
+	 * faerdhinen (inactive) is the bow), or the list item of the same name once "(damaged)"
+	 * and the like are dropped (Torva platebody (damaged) is the platebody). -1 if none.
+	 */
+	private int listId(int itemId, String name)
+	{
+		if (gearIndex.containsKey(itemId))
+		{
+			return itemId;
+		}
+		for (Map.Entry<String, List<Integer>> e : variants.entrySet())
+		{
+			if (e.getValue().contains(itemId))
+			{
+				try
+				{
+					final int id = Integer.parseInt(e.getKey());
+					if (gearIndex.containsKey(id))
+					{
+						return id;
+					}
+				}
+				catch (NumberFormatException ignored)
+				{
+					// not an item id
+				}
+			}
+		}
+		final String plain = TRADE_FORM.matcher(name).replaceAll("").trim();
+		for (Map.Entry<Integer, List<RebuildData.Use>> e : gearIndex.entrySet())
+		{
+			for (RebuildData.Use use : e.getValue())
+			{
+				if (use.getName() != null && use.getName().equalsIgnoreCase(plain))
+				{
+					return e.getKey();
+				}
+			}
+		}
+		return -1;
+	}
+
+	/** The form of a list item sold on the Grand Exchange, or -1. Client thread only. */
+	private int tradeForm(int listId, String name)
+	{
+		if (itemManager.getItemComposition(listId).isGeTradeable() && itemManager.getItemPrice(listId) > 0)
+		{
+			return listId;
+		}
+		for (int id : variants.getOrDefault(String.valueOf(listId), java.util.Collections.emptyList()))
+		{
+			if (itemManager.getItemComposition(id).isGeTradeable() && itemManager.getItemPrice(id) > 0)
+			{
+				return id;
+			}
+		}
+		final String lower = name.toLowerCase(java.util.Locale.ROOT);
+		for (ItemPrice item : itemManager.search(name))
+		{
+			final String other = item.getName().toLowerCase(java.util.Locale.ROOT);
+			if ((other.equals(lower) || other.startsWith(lower + " (")) && itemManager.getItemPrice(item.getId()) > 0)
+			{
+				return item.getId();
+			}
+		}
+		return -1;
+	}
+
+	/** One piece for a searched item that is gear from the lists, or null. Client thread only. */
+	private RebuildData.Piece piece(int itemId, String name)
+	{
+		final int id = listId(itemId, name);
+		if (id < 0)
+		{
+			return null;
+		}
+		final RebuildData.Use use = gearIndex.get(id).get(0);
+		final String worn = use.getName() != null ? use.getName() : TRADE_FORM.matcher(name).replaceAll("").trim();
+		return new RebuildData.Piece(id, itemId, worn, use.getSlot());
+	}
+
+	private List<String> styles(List<RebuildData.Piece> pieces)
+	{
+		final List<String> out = new ArrayList<>();
+		for (RebuildData.Piece piece : pieces)
+		{
+			for (RebuildData.Use use : gearIndex.getOrDefault(piece.getId(), java.util.Collections.emptyList()))
+			{
+				if (use.getSlot().equals(piece.getSlot()) && !out.contains(use.getStyle()))
+				{
+					out.add(use.getStyle());
+				}
+			}
+		}
+		return out;
+	}
+
+	/** "Torva", "Masori ... (f)", "Blood moon": what the pieces of one armour set share. */
+	private static String family(String name)
+	{
+		final String[] words = name.split(" ");
+		String key = words.length > 1 && words[1].equalsIgnoreCase("moon") ? words[0] + " " + words[1] : words[0];
+		if (name.endsWith("(f)"))
+		{
+			key += " (f)";
+		}
+		return key.toLowerCase(java.util.Locale.ROOT);
+	}
+
+	/** The head, body and legs of the set a piece belongs to, as list pieces; empty if it has no set. */
+	private List<RebuildData.Piece> setOf(RebuildData.Piece piece)
+	{
+		if (!ARMOUR.contains(piece.getSlot()))
+		{
+			return java.util.Collections.emptyList();
+		}
+		final String key = family(piece.getName());
+		final Set<String> pieceStyles = new HashSet<>(styles(java.util.Collections.singletonList(piece)));
+		final Map<String, RebuildData.Piece> bySlot = new java.util.LinkedHashMap<>();
+		for (String slot : ARMOUR)
+		{
+			for (Map.Entry<Integer, List<RebuildData.Use>> e : gearIndex.entrySet())
+			{
+				for (RebuildData.Use use : e.getValue())
+				{
+					if (slot.equals(use.getSlot()) && use.getName() != null && pieceStyles.contains(use.getStyle())
+						&& family(use.getName()).equals(key) && !bySlot.containsKey(slot))
+					{
+						bySlot.put(slot, new RebuildData.Piece(e.getKey(), -1, use.getName(), slot));
+					}
+				}
+			}
+		}
+		return bySlot.size() < 2 ? java.util.Collections.emptyList() : new ArrayList<>(bySlot.values());
 	}
 
 	private void search(String query)
@@ -484,10 +674,45 @@ public class RebuildPlannerPlugin extends Plugin
 				.thenComparing(c -> !c.getName().toLowerCase(java.util.Locale.ROOT).startsWith(lower))
 				.thenComparing(Plan.Choice::getPrice, java.util.Comparator.reverseOrder()));
 			final List<Plan.Choice> top = new ArrayList<>(hits.subList(0, Math.min(MAX_HITS, hits.size())));
+
+			// Armour from the lists also offers its whole set, e.g. "Torva set" for a Torva platebody.
+			final List<Plan.Choice> sets = new ArrayList<>();
+			for (Plan.Choice hit : top)
+			{
+				final RebuildData.Piece piece = piece(hit.getId(), hit.getName());
+				final List<RebuildData.Piece> set = piece == null ? java.util.Collections.emptyList() : setOf(piece);
+				if (set.isEmpty())
+				{
+					continue;
+				}
+				final String words = family(piece.getName());
+				final String name = Character.toUpperCase(words.charAt(0)) + words.substring(1).replace(" (f)", "")
+					+ " set" + (words.endsWith("(f)") ? " (f)" : "");
+				if (sets.stream().anyMatch(c -> c.getName().equals(name)))
+				{
+					continue;
+				}
+				long price = 0;
+				final List<RebuildData.Piece> priced = new ArrayList<>();
+				for (RebuildData.Piece p : set)
+				{
+					final int buy = tradeForm(p.getId(), p.getName());
+					price += buy > 0 ? itemManager.getItemPrice(buy) : 0;
+					priced.add(new RebuildData.Piece(p.getId(), buy > 0 ? buy : p.getId(), p.getName(), p.getSlot()));
+				}
+				searchSets.put(name, priced);
+				sets.add(new Plan.Choice(hit.getId(), hit.getId(), name, false, price));
+			}
+			top.addAll(0, sets);
 			SwingUtilities.invokeLater(() -> target.showSearchResults(query, top));
 		});
 	}
 
+	/**
+	 * Plans for a searched-for item. Gear from the lists (one piece or a whole set) is
+	 * checked against the player's setups, and what it beats is sold; anything else is
+	 * paid for with junk alone.
+	 */
 	private void pickItem(int itemId, String name)
 	{
 		final RebuildPanel target = panel;
@@ -495,11 +720,46 @@ public class RebuildPlannerPlugin extends Plugin
 		{
 			return;
 		}
-		final RebuildData.Goal goal = RebuildData.junk(itemId, name);
-		goals.removeIf(RebuildData.Goal::isJunk);
-		goals.add(goal);
-		configManager.setConfiguration(RebuildPlannerConfig.GROUP, CUSTOM_KEY, itemId + "|" + name);
-		target.setCustomGoal(goal, true);
+		clientThread.invokeLater(() ->
+		{
+			List<RebuildData.Piece> pieces = searchSets.get(name);
+			if (pieces == null)
+			{
+				final RebuildData.Piece piece = piece(itemId, name);
+				pieces = piece == null ? null : java.util.Collections.singletonList(piece);
+			}
+			final RebuildData.Goal goal;
+			final String stored;
+			if (pieces != null)
+			{
+				final List<String> styles = styles(pieces);
+				goal = RebuildData.gear(megarares(), name, pieces, styles);
+				final SavedGear gear = new SavedGear();
+				gear.setName(name);
+				gear.setStyles(styles);
+				gear.setPieces(pieces);
+				stored = gson.toJson(gear);
+				final List<Integer> ids = new ArrayList<>();
+				for (RebuildData.Piece p : pieces)
+				{
+					ids.add(p.getId());
+					ids.add(p.getBuyId());
+				}
+				facts.load(ids);
+			}
+			else
+			{
+				goal = RebuildData.junk(itemId, name);
+				stored = itemId + "|" + name;
+			}
+			SwingUtilities.invokeLater(() ->
+			{
+				goals.removeIf(RebuildData.Goal::isCustom);
+				goals.add(goal);
+				configManager.setConfiguration(RebuildPlannerConfig.GROUP, CUSTOM_KEY, stored);
+				target.setCustomGoal(goal, true);
+			});
+		});
 	}
 
 	// ---- Saved plans ---------------------------------------------------------

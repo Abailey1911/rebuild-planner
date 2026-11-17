@@ -288,6 +288,12 @@ public class Planner
 		return -1;
 	}
 
+	/** True when the player holds a piece of the goal, in the form worn or the form bought. */
+	private boolean ownsPiece(RebuildData.Piece piece)
+	{
+		return ownedForm(piece.getId()) >= 0 || ownedForm(piece.getBuyId()) >= 0;
+	}
+
 	private int voidHelm(String style)
 	{
 		switch (style)
@@ -576,6 +582,11 @@ public class Planner
 		this.settings = settings;
 		this.owned = owned;
 		this.goalIds = new HashSet<>(Arrays.asList(goal.getId(), goal.getBuyId()));
+		for (RebuildData.Piece piece : goal.pieceList())
+		{
+			goalIds.add(piece.getId());
+			goalIds.add(piece.getBuyId());
+		}
 		this.excluded = overrides == null ? Collections.emptySet() : overrides.getExcluded();
 		final Map<Integer, Long> customQty = overrides == null
 			? Collections.emptyMap() : overrides.getSellQuantity();
@@ -591,8 +602,27 @@ public class Planner
 		plan.setGoal(goal);
 		plan.setMethod(method);
 		plan.setCoins(coins);
-		plan.setGoalPrice(items.price(goal.getBuyId()));
-		plan.setAlreadyOwned(ownedForm(goal.getId()) >= 0 || ownedForm(goal.getBuyId()) >= 0);
+		if (goal.isUpgrade() && goal.pieceList().size() > 1)
+		{
+			// A whole set: pay only for the pieces not already held.
+			long price = 0;
+			boolean all = true;
+			for (RebuildData.Piece piece : goal.pieceList())
+			{
+				if (!ownsPiece(piece))
+				{
+					all = false;
+					price += items.price(piece.getBuyId());
+				}
+			}
+			plan.setGoalPrice(price);
+			plan.setAlreadyOwned(all);
+		}
+		else
+		{
+			plan.setGoalPrice(items.price(goal.getBuyId()));
+			plan.setAlreadyOwned(ownedForm(goal.getId()) >= 0 || ownedForm(goal.getBuyId()) >= 0);
+		}
 
 		// ---- Every setup, as the player owns it ---------------------------
 		final List<Role> roles = new ArrayList<>();
@@ -1216,28 +1246,52 @@ public class Planner
 		if (goal.isUpgrade())
 		{
 			final Rules ownedOnly = new Rules(Long.MAX_VALUE, false);
-			final String slot = goal.getSlot();
-			final boolean known = items.stats(goal.getId()) != null;
+			final List<RebuildData.Piece> pieces = goal.pieceList();
+			final Set<String> slots = new HashSet<>();
+			boolean known = true;
+			for (RebuildData.Piece piece : pieces)
+			{
+				slots.add(piece.getSlot());
+				known &= items.stats(piece.getId()) != null;
+			}
 			for (Role role : roles)
 			{
 				final Map<String, Option> best = choose(role, ownedOnly, false);
 				final Option weapon = best == null ? null : best.get("WEAPON");
-				if (weapon == null)
+				final boolean applies = goal.appliesTo(role.data.getStyle());
+				// A style with no weapon owned has no setup to keep, unless the upgrade is its weapon.
+				if (best == null || (weapon == null && !(applies && slots.contains("WEAPON"))))
 				{
 					continue;
 				}
 				final String style = role.data.getStyle().charAt(0) + role.data.getStyle().substring(1).toLowerCase(Locale.ROOT);
-				final Option was = best.get(slot);
-				final Map<String, Option> with = new LinkedHashMap<>(best);
-				with.put(slot, new Option(goal.getId(), -1, goal.getName(), -1));
-				final double now = dps(role, best, false);
-				final double then = dps(role, with, false);
-				plan.getChecks().add(new Plan.Check(style, weapon.name, was == null ? null : was.name,
-					known && now > 0 ? (then - now) / now * 100 : 0));
+				// The upgrade replaces what it beats in its own styles; other styles keep everything.
+				boolean replaces = false;
+				if (applies)
+				{
+					final Map<String, Option> with = new LinkedHashMap<>(best);
+					final List<String> was = new ArrayList<>();
+					for (RebuildData.Piece piece : pieces)
+					{
+						final Option old = best.get(piece.getSlot());
+						if (old != null && !was.contains(old.name))
+						{
+							was.add(old.name);
+						}
+						with.put(piece.getSlot(), new Option(piece.getId(), -1, piece.getName(), -1));
+					}
+					final double now = weapon == null ? 0 : dps(role, best, false);
+					final double then = dps(role, with, false);
+					final Option wields = with.get("WEAPON");
+					plan.getChecks().add(new Plan.Check(style, wields == null ? "weapon" : wields.name,
+						was.isEmpty() ? null : String.join(", ", was), known && now > 0 ? (then - now) / now * 100 : 0));
+					// Never sell gear the upgrade does worse than (a Bow of faerdhinen over a Twisted bow).
+					replaces = !known || now <= 0 || then > now;
+				}
 				for (Map.Entry<String, Option> entry : best.entrySet())
 				{
 					final Option option = entry.getValue();
-					if (option == null || option.ownedId < 0 || slot.equals(entry.getKey()))
+					if (option == null || option.ownedId < 0 || (replaces && slots.contains(entry.getKey())))
 					{
 						continue;
 					}
@@ -1248,7 +1302,13 @@ public class Planner
 					}
 					plan.getKeeps().add(new Plan.Keep(option.ownedId, style, entry.getKey(), option.name, 1, false));
 				}
-				plan.getKeeps().add(new Plan.Keep(goal.getId(), style, slot, goal.getName(), 1, !plan.isAlreadyOwned()));
+				if (replaces)
+				{
+					for (RebuildData.Piece piece : pieces)
+					{
+						plan.getKeeps().add(new Plan.Keep(piece.getId(), style, piece.getSlot(), piece.getName(), 1, !ownsPiece(piece)));
+					}
+				}
 			}
 		}
 		else
